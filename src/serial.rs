@@ -428,10 +428,7 @@ pub struct ConnectionSummary {
     pub port: String,
 }
 
-fn is_port_in_use(
-    connections: &HashMap<String, Arc<SerialConnection>>,
-    port: &str,
-) -> bool {
+fn is_port_in_use(connections: &HashMap<String, Arc<SerialConnection>>, port: &str) -> bool {
     connections.values().any(|c| c.port() == port)
 }
 
@@ -471,10 +468,7 @@ pub(crate) mod test_support {
             Pin::new(&mut self.0).poll_write(cx, buf)
         }
 
-        fn poll_flush(
-            mut self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-        ) -> Poll<std::io::Result<()>> {
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
             Pin::new(&mut self.0).poll_flush(cx)
         }
 

@@ -98,7 +98,11 @@ fn decode_base64(input: &str) -> Result<Vec<u8>, CodecError> {
 }
 
 fn encode_hex_spaced(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ")
+    bytes
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
@@ -139,19 +143,34 @@ mod tests {
 
     #[test]
     fn hex_odd_length_rejected() {
-        assert!(matches!(decode(Encoding::Hex, "48656c6c6"), Err(CodecError::HexOddLength)));
+        assert!(matches!(
+            decode(Encoding::Hex, "48656c6c6"),
+            Err(CodecError::HexOddLength)
+        ));
     }
 
     #[test]
     fn hex_invalid_chars_rejected() {
-        assert!(matches!(decode(Encoding::Hex, "48656cXY"), Err(CodecError::InvalidHex(_))));
+        assert!(matches!(
+            decode(Encoding::Hex, "48656cXY"),
+            Err(CodecError::InvalidHex(_))
+        ));
     }
 
     #[test]
     fn base64_roundtrip_and_padding_variants() {
-        assert_eq!(decode(Encoding::Base64, "SGVsbG8gV29ybGQ=").unwrap(), b"Hello World");
-        assert_eq!(decode(Encoding::Base64, "SGVsbG8gV29ybGQ").unwrap(), b"Hello World");
-        assert_eq!(encode(Encoding::Base64, b"Hello World").unwrap(), "SGVsbG8gV29ybGQ=");
+        assert_eq!(
+            decode(Encoding::Base64, "SGVsbG8gV29ybGQ=").unwrap(),
+            b"Hello World"
+        );
+        assert_eq!(
+            decode(Encoding::Base64, "SGVsbG8gV29ybGQ").unwrap(),
+            b"Hello World"
+        );
+        assert_eq!(
+            encode(Encoding::Base64, b"Hello World").unwrap(),
+            "SGVsbG8gV29ybGQ="
+        );
     }
 
     #[test]

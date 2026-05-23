@@ -126,18 +126,42 @@ pub struct WaitForArgs {
     pub response_encoding: String,
 }
 
-fn default_data_bits() -> String { "8".into() }
-fn default_stop_bits() -> String { "1".into() }
-fn default_parity() -> String { "none".into() }
-fn default_flow_control() -> String { "none".into() }
-fn default_encoding() -> String { "utf8".into() }
-fn default_max_bytes() -> usize { 1024 }
-fn default_flush_target() -> FlushTarget { FlushTarget::Both }
-fn default_break_duration_ms() -> u64 { 250 }
-fn default_wait_timeout_ms() -> u64 { 5000 }
-fn default_wait_max_bytes() -> usize { 4096 }
-fn default_subscribe_chunk_bytes() -> usize { 1024 }
-fn default_subscribe_poll_ms() -> u64 { 200 }
+fn default_data_bits() -> String {
+    "8".into()
+}
+fn default_stop_bits() -> String {
+    "1".into()
+}
+fn default_parity() -> String {
+    "none".into()
+}
+fn default_flow_control() -> String {
+    "none".into()
+}
+fn default_encoding() -> String {
+    "utf8".into()
+}
+fn default_max_bytes() -> usize {
+    1024
+}
+fn default_flush_target() -> FlushTarget {
+    FlushTarget::Both
+}
+fn default_break_duration_ms() -> u64 {
+    250
+}
+fn default_wait_timeout_ms() -> u64 {
+    5000
+}
+fn default_wait_max_bytes() -> usize {
+    4096
+}
+fn default_subscribe_chunk_bytes() -> usize {
+    1024
+}
+fn default_subscribe_poll_ms() -> u64 {
+    200
+}
 
 // ---- Tool response structs --------------------------------------------------
 
@@ -279,7 +303,10 @@ impl SerialHandler {
         let ports = PortInfo::list_available()
             .map_err(|e| log_tool_err("list_ports", "Failed to list ports", e))?;
         info!("Found {} serial ports", ports.len());
-        Ok(Json(ListPortsResult { count: ports.len(), ports }))
+        Ok(Json(ListPortsResult {
+            count: ports.len(),
+            ports,
+        }))
     }
 
     #[tool(description = "Open a serial port connection with specified configuration")]
@@ -292,11 +319,17 @@ impl SerialHandler {
         let baud_rate = config.baud_rate;
         debug!("Opening {} @ {}", port, baud_rate);
 
-        let connection_id = self.connections.open(config).await.map_err(|e| {
-            log_tool_err("open", &format!("Failed to open port {}", port), e)
-        })?;
+        let connection_id = self
+            .connections
+            .open(config)
+            .await
+            .map_err(|e| log_tool_err("open", &format!("Failed to open port {}", port), e))?;
         info!("Opened connection {} -> {}", connection_id, port);
-        Ok(Json(OpenResult { connection_id, port, baud_rate }))
+        Ok(Json(OpenResult {
+            connection_id,
+            port,
+            baud_rate,
+        }))
     }
 
     #[tool(description = "Close an open serial port connection")]
@@ -305,15 +338,20 @@ impl SerialHandler {
         Parameters(args): Parameters<CloseArgs>,
     ) -> Result<Json<CloseResult>, String> {
         debug!("Closing {}", args.connection_id);
-        self.connections.close(&args.connection_id).await.map_err(|e| {
-            log_tool_err(
-                "close",
-                &format!("Failed to close connection {}", args.connection_id),
-                e,
-            )
-        })?;
+        self.connections
+            .close(&args.connection_id)
+            .await
+            .map_err(|e| {
+                log_tool_err(
+                    "close",
+                    &format!("Failed to close connection {}", args.connection_id),
+                    e,
+                )
+            })?;
         info!("Closed connection {}", args.connection_id);
-        Ok(Json(CloseResult { connection_id: args.connection_id }))
+        Ok(Json(CloseResult {
+            connection_id: args.connection_id,
+        }))
     }
 
     #[tool(description = "Write data to a serial port connection")]
@@ -349,7 +387,10 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<ReadArgs>,
     ) -> Result<Json<ReadResult>, String> {
-        debug!("Read from {} (timeout {:?})", args.connection_id, args.timeout_ms);
+        debug!(
+            "Read from {} (timeout {:?})",
+            args.connection_id, args.timeout_ms
+        );
         let encoding = parse_encoding(&args.encoding)?;
         let connection = self.lookup_connection(&args.connection_id).await?;
         let outcome = read_bytes(&connection, args.max_bytes, args.timeout_ms).await?;
@@ -373,7 +414,10 @@ impl SerialHandler {
             )
         })?;
         info!("Flushed {} ({:?})", args.connection_id, args.target);
-        Ok(Json(FlushResult { connection_id: args.connection_id, target: args.target }))
+        Ok(Json(FlushResult {
+            connection_id: args.connection_id,
+            target: args.target,
+        }))
     }
 
     #[tool(
@@ -383,16 +427,25 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<SetDtrRtsArgs>,
     ) -> Result<Json<SetDtrRtsResult>, String> {
-        debug!("set_dtr_rts {} dtr={} rts={}", args.connection_id, args.dtr, args.rts);
+        debug!(
+            "set_dtr_rts {} dtr={} rts={}",
+            args.connection_id, args.dtr, args.rts
+        );
         let connection = self.lookup_connection(&args.connection_id).await?;
-        connection.set_dtr_rts(args.dtr, args.rts).await.map_err(|e| {
-            log_tool_err(
-                "set_dtr_rts",
-                &format!("Failed to set control lines on {}", args.connection_id),
-                e,
-            )
-        })?;
-        info!("Control lines on {} set to dtr={} rts={}", args.connection_id, args.dtr, args.rts);
+        connection
+            .set_dtr_rts(args.dtr, args.rts)
+            .await
+            .map_err(|e| {
+                log_tool_err(
+                    "set_dtr_rts",
+                    &format!("Failed to set control lines on {}", args.connection_id),
+                    e,
+                )
+            })?;
+        info!(
+            "Control lines on {} set to dtr={} rts={}",
+            args.connection_id, args.dtr, args.rts
+        );
         Ok(Json(SetDtrRtsResult {
             connection_id: args.connection_id,
             dtr: args.dtr,
@@ -408,7 +461,10 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<SendBreakArgs>,
     ) -> Result<Json<SendBreakResult>, String> {
-        debug!("send_break {} duration={}ms", args.connection_id, args.duration_ms);
+        debug!(
+            "send_break {} duration={}ms",
+            args.connection_id, args.duration_ms
+        );
         let connection = self.lookup_connection(&args.connection_id).await?;
         connection.send_break(args.duration_ms).await.map_err(|e| {
             log_tool_err(
@@ -417,7 +473,10 @@ impl SerialHandler {
                 e,
             )
         })?;
-        info!("Sent break on {} for {}ms", args.connection_id, args.duration_ms);
+        info!(
+            "Sent break on {} for {}ms",
+            args.connection_id, args.duration_ms
+        );
         Ok(Json(SendBreakResult {
             connection_id: args.connection_id,
             duration_ms: args.duration_ms,
@@ -447,7 +506,10 @@ impl SerialHandler {
 
         let mut streams = self.streams.lock().await;
         let replaced_previous = streams.insert(id.clone(), StreamHandle { join }).is_some();
-        info!("subscribed RX stream for {} (replaced={})", id, replaced_previous);
+        info!(
+            "subscribed RX stream for {} (replaced={})",
+            id, replaced_previous
+        );
         Ok(Json(SubscribeResult {
             connection_id: id,
             encoding: encoding.to_string(),
@@ -467,7 +529,10 @@ impl SerialHandler {
         debug!("unsubscribe {}", args.connection_id);
         let mut streams = self.streams.lock().await;
         let was_active = streams.remove(&args.connection_id).is_some();
-        info!("unsubscribed {} (was_active={})", args.connection_id, was_active);
+        info!(
+            "unsubscribed {} (was_active={})",
+            args.connection_id, was_active
+        );
         Ok(Json(UnsubscribeResult {
             connection_id: args.connection_id,
             was_active,
@@ -542,9 +607,15 @@ async fn read_bytes(
     match connection.read(&mut buf, timeout_ms).await {
         Ok(n) => {
             buf.truncate(n);
-            Ok(ReadOutcome { bytes: buf, timed_out: n == 0 })
+            Ok(ReadOutcome {
+                bytes: buf,
+                timed_out: n == 0,
+            })
         }
-        Err(SerialError::ReadTimeout) => Ok(ReadOutcome { bytes: Vec::new(), timed_out: true }),
+        Err(SerialError::ReadTimeout) => Ok(ReadOutcome {
+            bytes: Vec::new(),
+            timed_out: true,
+        }),
         Err(e) => Err(log_tool_err("read", "Data reading failed", e)),
     }
 }
@@ -617,11 +688,19 @@ async fn read_until_pattern(
             });
         }
         if accumulated.len() >= max_bytes {
-            return Ok(WaitOutcome { bytes: accumulated, match_index: None, timed_out: false });
+            return Ok(WaitOutcome {
+                bytes: accumulated,
+                match_index: None,
+                timed_out: false,
+            });
         }
         let now = Instant::now();
         if now >= deadline {
-            return Ok(WaitOutcome { bytes: accumulated, match_index: None, timed_out: true });
+            return Ok(WaitOutcome {
+                bytes: accumulated,
+                match_index: None,
+                timed_out: true,
+            });
         }
 
         let remaining_ms = (deadline - now).as_millis() as u64;
@@ -634,7 +713,11 @@ async fn read_until_pattern(
                 accumulated.extend_from_slice(&chunk);
             }
             Err(SerialError::ReadTimeout) => {
-                return Ok(WaitOutcome { bytes: accumulated, match_index: None, timed_out: true });
+                return Ok(WaitOutcome {
+                    bytes: accumulated,
+                    match_index: None,
+                    timed_out: true,
+                });
             }
             Err(e) => return Err(log_tool_err("wait_for", "Read failed during wait", e)),
         }
@@ -653,7 +736,9 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || haystack.len() < needle.len() {
         return None;
     }
-    haystack.windows(needle.len()).position(|window| window == needle)
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 fn build_read_result(
@@ -727,7 +812,10 @@ fn parse_parity(raw: &str) -> Result<Parity, String> {
         "none" => Ok(Parity::None),
         "odd" => Ok(Parity::Odd),
         "even" => Ok(Parity::Even),
-        other => Err(format!("Invalid parity {:?} (expected none/odd/even)", other)),
+        other => Err(format!(
+            "Invalid parity {:?} (expected none/odd/even)",
+            other
+        )),
     }
 }
 
@@ -826,11 +914,10 @@ Report: device identification (vendor, role, protocol), the working serial param
             port = args.port,
             starting = starting
         );
-        Ok(GetPromptResult::new(vec![PromptMessage::new_text(
-            PromptMessageRole::User,
-            user,
-        )])
-        .with_description(format!("Diagnosis plan for port {}", args.port)))
+        Ok(
+            GetPromptResult::new(vec![PromptMessage::new_text(PromptMessageRole::User, user)])
+                .with_description(format!("Diagnosis plan for port {}", args.port)),
+        )
     }
 
     /// Guide an interactive serial REPL session against an already-open
@@ -872,14 +959,13 @@ current prompt, then report back and wait for the user's first command.",
             line_ending = line_ending,
             prompt = device_prompt
         );
-        Ok(GetPromptResult::new(vec![PromptMessage::new_text(
-            PromptMessageRole::User,
-            user,
-        )])
-        .with_description(format!(
-            "Interactive REPL session over connection {}",
-            args.connection_id
-        )))
+        Ok(
+            GetPromptResult::new(vec![PromptMessage::new_text(PromptMessageRole::User, user)])
+                .with_description(format!(
+                    "Interactive REPL session over connection {}",
+                    args.connection_id
+                )),
+        )
     }
 }
 
@@ -922,8 +1008,7 @@ impl ServerHandler for SerialHandler {
             resources: vec![
                 RawResource::new(URI_PORTS, "Available serial ports")
                     .with_description(
-                        "JSON list of serial ports the OS currently exposes."
-                            .to_string(),
+                        "JSON list of serial ports the OS currently exposes.".to_string(),
                     )
                     .with_mime_type("application/json".to_string())
                     .no_annotation(),
@@ -969,16 +1054,18 @@ impl ServerHandler for SerialHandler {
         let uri = request.uri;
         match parse_resource_uri(&uri) {
             ResourceUriKind::Ports => {
-                let ports = PortInfo::list_available()
-                    .map_err(|e| McpError::internal_error(format!("Failed to list ports: {}", e), None))?;
+                let ports = PortInfo::list_available().map_err(|e| {
+                    McpError::internal_error(format!("Failed to list ports: {}", e), None)
+                })?;
                 let body = serde_json::to_string_pretty(&ListPortsResult {
                     count: ports.len(),
                     ports,
                 })
                 .map_err(|e| McpError::internal_error(format!("serialize: {}", e), None))?;
-                Ok(ReadResourceResult::new(vec![
-                    ResourceContents::text(body, uri).with_mime_type("application/json"),
-                ]))
+                Ok(ReadResourceResult::new(vec![ResourceContents::text(
+                    body, uri,
+                )
+                .with_mime_type("application/json")]))
             }
             ResourceUriKind::ConnectionsList => {
                 let summaries = self.connections.list_open().await;
@@ -987,9 +1074,10 @@ impl ServerHandler for SerialHandler {
                     connections: summaries,
                 })
                 .map_err(|e| McpError::internal_error(format!("serialize: {}", e), None))?;
-                Ok(ReadResourceResult::new(vec![
-                    ResourceContents::text(body, uri).with_mime_type("application/json"),
-                ]))
+                Ok(ReadResourceResult::new(vec![ResourceContents::text(
+                    body, uri,
+                )
+                .with_mime_type("application/json")]))
             }
             ResourceUriKind::ConnectionDetail(id) => {
                 let conn = self.connections.get(&id).await.map_err(|_| {
@@ -1003,9 +1091,10 @@ impl ServerHandler for SerialHandler {
                     port: conn.port().to_string(),
                 })
                 .map_err(|e| McpError::internal_error(format!("serialize: {}", e), None))?;
-                Ok(ReadResourceResult::new(vec![
-                    ResourceContents::text(body, uri).with_mime_type("application/json"),
-                ]))
+                Ok(ReadResourceResult::new(vec![ResourceContents::text(
+                    body, uri,
+                )
+                .with_mime_type("application/json")]))
             }
             ResourceUriKind::Unknown => Err(McpError::resource_not_found(
                 "resource_not_found",
@@ -1097,7 +1186,10 @@ mod tests {
 
     #[test]
     fn build_read_result_timeout_branch() {
-        let outcome = ReadOutcome { bytes: Vec::new(), timed_out: true };
+        let outcome = ReadOutcome {
+            bytes: Vec::new(),
+            timed_out: true,
+        };
         let Json(result) = build_read_result(outcome, "abc".into(), Encoding::Utf8, Some(250))
             .expect("timeout result must build");
         assert!(result.timed_out);
@@ -1108,7 +1200,10 @@ mod tests {
 
     #[test]
     fn build_read_result_timeout_uses_default() {
-        let outcome = ReadOutcome { bytes: Vec::new(), timed_out: true };
+        let outcome = ReadOutcome {
+            bytes: Vec::new(),
+            timed_out: true,
+        };
         let Json(result) = build_read_result(outcome, "abc".into(), Encoding::Hex, None)
             .expect("timeout result must build");
         assert_eq!(result.timeout_ms, DEFAULT_READ_TIMEOUT_MS);
@@ -1116,7 +1211,10 @@ mod tests {
 
     #[test]
     fn build_read_result_data_branch_encodes_hex() {
-        let outcome = ReadOutcome { bytes: b"Hi".to_vec(), timed_out: false };
+        let outcome = ReadOutcome {
+            bytes: b"Hi".to_vec(),
+            timed_out: false,
+        };
         let Json(result) = build_read_result(outcome, "abc".into(), Encoding::Hex, Some(500))
             .expect("data result must build");
         assert!(!result.timed_out);
@@ -1159,7 +1257,9 @@ mod tests {
         let writer = tokio::spawn(async move {
             peer.write_all(b"junk before OK> and tail").await.unwrap();
         });
-        let outcome = read_until_pattern(&conn, b"OK>", 1_000, 1024).await.unwrap();
+        let outcome = read_until_pattern(&conn, b"OK>", 1_000, 1024)
+            .await
+            .unwrap();
         writer.await.unwrap();
         assert_eq!(outcome.match_index, Some(12));
         assert!(!outcome.timed_out);
@@ -1191,13 +1291,22 @@ mod tests {
 
     #[test]
     fn resource_uri_unknown_targets() {
-        assert_eq!(parse_resource_uri("serial://other"), ResourceUriKind::Unknown);
-        assert_eq!(parse_resource_uri("serial://connections/"), ResourceUriKind::Unknown);
+        assert_eq!(
+            parse_resource_uri("serial://other"),
+            ResourceUriKind::Unknown
+        );
+        assert_eq!(
+            parse_resource_uri("serial://connections/"),
+            ResourceUriKind::Unknown
+        );
         assert_eq!(
             parse_resource_uri("serial://connections/abc/extra"),
             ResourceUriKind::Unknown
         );
-        assert_eq!(parse_resource_uri("https://example.com"), ResourceUriKind::Unknown);
+        assert_eq!(
+            parse_resource_uri("https://example.com"),
+            ResourceUriKind::Unknown
+        );
     }
 
     #[test]
