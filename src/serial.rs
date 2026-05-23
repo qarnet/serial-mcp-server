@@ -1,3 +1,11 @@
+//! Serial port discovery, configuration, and a session-less connection manager.
+//!
+//! Public surface:
+//! - [`PortInfo::list_available`] enumerates serial ports on the host.
+//! - [`SerialConnection::open`] opens a single configured port.
+//! - [`ConnectionManager`] holds a set of open connections indexed by id and
+//!   rejects double-opens of the same port.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,6 +20,12 @@ use uuid::Uuid;
 
 use crate::error::{Result, SerialError};
 
+/// Largest baud rate accepted by [`SerialConnection::open`]. Anything higher
+/// is treated as a typo or accidental overflow and rejected.
+pub const MAX_BAUD_RATE: u32 = 4_000_000;
+
+// ---- Configuration enums -----------------------------------------------------
+
 #[derive(Debug, Clone, Copy, Deserialize)]
 pub enum DataBits {
     #[serde(rename = "5")]
@@ -25,8 +39,8 @@ pub enum DataBits {
 }
 
 impl From<DataBits> for serialport::DataBits {
-    fn from(b: DataBits) -> Self {
-        match b {
+    fn from(value: DataBits) -> Self {
+        match value {
             DataBits::Five => Self::Five,
             DataBits::Six => Self::Six,
             DataBits::Seven => Self::Seven,
@@ -44,8 +58,8 @@ pub enum StopBits {
 }
 
 impl From<StopBits> for serialport::StopBits {
-    fn from(b: StopBits) -> Self {
-        match b {
+    fn from(value: StopBits) -> Self {
+        match value {
             StopBits::One => Self::One,
             StopBits::Two => Self::Two,
         }
@@ -61,8 +75,8 @@ pub enum Parity {
 }
 
 impl From<Parity> for serialport::Parity {
-    fn from(p: Parity) -> Self {
-        match p {
+    fn from(value: Parity) -> Self {
+        match value {
             Parity::None => Self::None,
             Parity::Odd => Self::Odd,
             Parity::Even => Self::Even,
@@ -79,8 +93,8 @@ pub enum FlowControl {
 }
 
 impl From<FlowControl> for serialport::FlowControl {
-    fn from(f: FlowControl) -> Self {
-        match f {
+    fn from(value: FlowControl) -> Self {
+        match value {
             FlowControl::None => Self::None,
             FlowControl::Software => Self::Software,
             FlowControl::Hardware => Self::Hardware,
@@ -88,6 +102,7 @@ impl From<FlowControl> for serialport::FlowControl {
     }
 }
 
+/// Concrete parameters required to open a serial port.
 #[derive(Debug, Clone)]
 pub struct ConnectionConfig {
     pub port: String,
@@ -98,6 +113,9 @@ pub struct ConnectionConfig {
     pub flow_control: FlowControl,
 }
 
+// ---- Port enumeration --------------------------------------------------------
+
+/// Information about a serial port reported by the OS.
 #[derive(Debug, Serialize)]
 pub struct PortInfo {
     pub name: String,
@@ -107,20 +125,23 @@ pub struct PortInfo {
 }
 
 impl PortInfo {
-    pub fn list() -> std::result::Result<Vec<PortInfo>, serialport::Error> {
-        Ok(available_ports()?
-            .into_iter()
-            .map(|p| PortInfo {
-                hardware_id: hardware_id(&p),
-                description: description(&p),
-                name: p.port_name,
-            })
-            .collect())
+    /// Enumerate all serial ports the operating system currently exposes.
+    pub fn list_available() -> Result<Vec<PortInfo>> {
+        let ports = available_ports()?;
+        Ok(ports.into_iter().map(PortInfo::from_os).collect())
+    }
+
+    fn from_os(port: SerialPortInfo) -> Self {
+        PortInfo {
+            hardware_id: format_hardware_id(&port),
+            description: describe_port(&port),
+            name: port.port_name,
+        }
     }
 }
 
-fn hardware_id(p: &SerialPortInfo) -> Option<String> {
-    match &p.port_type {
+fn format_hardware_id(port: &SerialPortInfo) -> Option<String> {
+    match &port.port_type {
         SerialPortType::UsbPort(info) => {
             Some(format!("USB VID:{:04X} PID:{:04X}", info.vid, info.pid))
         }
@@ -130,8 +151,8 @@ fn hardware_id(p: &SerialPortInfo) -> Option<String> {
     }
 }
 
-fn description(p: &SerialPortInfo) -> String {
-    match &p.port_type {
+fn describe_port(port: &SerialPortInfo) -> String {
+    match &port.port_type {
         SerialPortType::UsbPort(info) => format!(
             "{} {}",
             info.manufacturer.as_deref().unwrap_or("Unknown"),
@@ -143,6 +164,10 @@ fn description(p: &SerialPortInfo) -> String {
     }
 }
 
+// ---- Single open connection --------------------------------------------------
+
+/// A single open serial port. Cheap to clone via [`Arc`] because all state lives
+/// behind a [`Mutex`].
 #[derive(Debug)]
 pub struct SerialConnection {
     id: String,
@@ -151,19 +176,10 @@ pub struct SerialConnection {
 }
 
 impl SerialConnection {
+    /// Open a serial port using the supplied configuration.
     pub async fn open(config: ConnectionConfig) -> Result<Self> {
-        if config.baud_rate == 0 || config.baud_rate > 4_000_000 {
-            return Err(SerialError::InvalidBaudRate(config.baud_rate));
-        }
-
-        let stream = tokio_serial::new(&config.port, config.baud_rate)
-            .data_bits(config.data_bits.into())
-            .stop_bits(config.stop_bits.into())
-            .parity(config.parity.into())
-            .flow_control(config.flow_control.into())
-            .open_native_async()
-            .map_err(|e| SerialError::ConnectionFailed(format!("{}: {}", config.port, e)))?;
-
+        ensure_valid_baud_rate(config.baud_rate)?;
+        let stream = build_stream(&config)?;
         Ok(Self {
             id: Uuid::new_v4().to_string(),
             port: config.port,
@@ -179,25 +195,50 @@ impl SerialConnection {
         &self.port
     }
 
+    /// Write a byte slice, flushing before returning.
     pub async fn write(&self, data: &[u8]) -> Result<usize> {
         let mut stream = self.stream.lock().await;
-        let n = stream.write(data).await?;
+        let written = stream.write(data).await?;
         stream.flush().await?;
-        Ok(n)
+        Ok(written)
     }
 
-    pub async fn read(&self, buf: &mut [u8], timeout_ms: Option<u64>) -> Result<usize> {
+    /// Read up to `dst.len()` bytes. Returns [`SerialError::ReadTimeout`] if
+    /// `timeout_ms` is set and elapses before any byte arrives.
+    pub async fn read(&self, dst: &mut [u8], timeout_ms: Option<u64>) -> Result<usize> {
         let mut stream = self.stream.lock().await;
         match timeout_ms {
-            Some(ms) => match timeout(Duration::from_millis(ms), stream.read(buf)).await {
-                Ok(r) => Ok(r?),
-                Err(_) => Err(SerialError::ReadTimeout),
+            Some(ms) => match timeout(Duration::from_millis(ms), stream.read(dst)).await {
+                Ok(io_result) => Ok(io_result?),
+                Err(_elapsed) => Err(SerialError::ReadTimeout),
             },
-            None => Ok(stream.read(buf).await?),
+            None => Ok(stream.read(dst).await?),
         }
     }
 }
 
+fn ensure_valid_baud_rate(baud_rate: u32) -> Result<()> {
+    if baud_rate == 0 || baud_rate > MAX_BAUD_RATE {
+        Err(SerialError::InvalidBaudRate(baud_rate))
+    } else {
+        Ok(())
+    }
+}
+
+fn build_stream(config: &ConnectionConfig) -> Result<SerialStream> {
+    tokio_serial::new(&config.port, config.baud_rate)
+        .data_bits(config.data_bits.into())
+        .stop_bits(config.stop_bits.into())
+        .parity(config.parity.into())
+        .flow_control(config.flow_control.into())
+        .open_native_async()
+        .map_err(|e| SerialError::ConnectionFailed(format!("{}: {}", config.port, e)))
+}
+
+// ---- Multi-connection registry ----------------------------------------------
+
+/// Registry of currently open serial connections, indexed by an opaque
+/// connection id. Rejects opening the same port twice.
 #[derive(Debug, Default)]
 pub struct ConnectionManager {
     connections: Mutex<HashMap<String, Arc<SerialConnection>>>,
@@ -208,17 +249,20 @@ impl ConnectionManager {
         Self::default()
     }
 
+    /// Open a new connection and store it. Returns the new connection id.
     pub async fn open(&self, config: ConnectionConfig) -> Result<String> {
-        let mut conns = self.connections.lock().await;
-        if conns.values().any(|c| c.port() == config.port) {
+        let mut connections = self.connections.lock().await;
+        if is_port_in_use(&connections, &config.port) {
             return Err(SerialError::ConnectionExists(config.port));
         }
-        let conn = Arc::new(SerialConnection::open(config).await?);
-        let id = conn.id().to_string();
-        conns.insert(id.clone(), conn);
+        let connection = Arc::new(SerialConnection::open(config).await?);
+        let id = connection.id().to_string();
+        connections.insert(id.clone(), connection);
         Ok(id)
     }
 
+    /// Remove a connection. The serial port is closed when the last [`Arc`]
+    /// reference is dropped, which happens here if no caller still holds one.
     pub async fn close(&self, id: &str) -> Result<()> {
         self.connections
             .lock()
@@ -228,6 +272,7 @@ impl ConnectionManager {
         Ok(())
     }
 
+    /// Look up an existing connection by id.
     pub async fn get(&self, id: &str) -> Result<Arc<SerialConnection>> {
         self.connections
             .lock()
@@ -235,5 +280,40 @@ impl ConnectionManager {
             .get(id)
             .cloned()
             .ok_or_else(|| SerialError::InvalidConnection(id.to_string()))
+    }
+}
+
+fn is_port_in_use(
+    connections: &HashMap<String, Arc<SerialConnection>>,
+    port: &str,
+) -> bool {
+    connections.values().any(|c| c.port() == port)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn baud_rate_zero_rejected() {
+        assert!(matches!(
+            ensure_valid_baud_rate(0),
+            Err(SerialError::InvalidBaudRate(0))
+        ));
+    }
+
+    #[test]
+    fn baud_rate_over_max_rejected() {
+        assert!(matches!(
+            ensure_valid_baud_rate(MAX_BAUD_RATE + 1),
+            Err(SerialError::InvalidBaudRate(_))
+        ));
+    }
+
+    #[test]
+    fn baud_rate_within_range_accepted() {
+        assert!(ensure_valid_baud_rate(115200).is_ok());
+        assert!(ensure_valid_baud_rate(1).is_ok());
+        assert!(ensure_valid_baud_rate(MAX_BAUD_RATE).is_ok());
     }
 }
