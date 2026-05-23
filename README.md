@@ -186,6 +186,38 @@ For long-running passive monitoring, swap step 5 for
 `subscribe(id)` and let the server push everything the board prints
 as MCP notifications.
 
+## Supported hardware
+
+Nothing about this server is device-specific — anything that exposes
+a UART or USB-Serial endpoint to the host OS works. The configurations
+below are the ones that have been exercised in practice:
+
+**Boards**
+
+- STM32 — any series with UART (USB-CDC variants or external USB-UART)
+- Arduino — Uno, Nano, Leonardo (built-in USB), ESP32, ESP8266
+- Industrial bridges — RS-485 transceivers, Modbus gateways
+- IoT sensors / actuators with a serial console
+
+**USB-Serial bridge chips**
+
+- CH340 / CH341 / CH343 (WCH)
+- CP2102 / CP2104 (Silicon Labs)
+- FTDI FT232 / FT231 family
+- Native USB-CDC (STM32 with USB peripheral, Arduino Leonardo)
+
+**Platform support**
+
+| Platform | Port name format | Examples |
+|---|---|---|
+| Windows | `COMx` | `COM1`, `COM3`, `COM19` |
+| Linux | `/dev/tty*` | `/dev/ttyUSB0`, `/dev/ttyACM0` |
+| macOS | `/dev/tty.*` or `/dev/cu.*` | `/dev/tty.usbserial-1234` |
+
+On Linux, the user running the server typically needs to be in the
+`dialout` (Debian/Ubuntu) or `uucp` (Arch/Fedora) group to access
+`/dev/tty*` without root.
+
 ## Build, test, lint
 
 ```bash
