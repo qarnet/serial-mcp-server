@@ -8,8 +8,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rmcp::{
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    handler::server::{
+        router::{prompt::PromptRouter, tool::ToolRouter},
+        wrapper::Parameters,
+    },
     model::*,
+    prompt, prompt_handler, prompt_router,
     service::RequestContext,
     tool, tool_handler, tool_router, ErrorData as McpError, Json, RoleServer, ServerHandler,
 };
@@ -194,6 +198,8 @@ pub struct SerialHandler {
     connections: Arc<ConnectionManager>,
     #[allow(dead_code)]
     tool_router: ToolRouter<SerialHandler>,
+    #[allow(dead_code)]
+    prompt_router: PromptRouter<SerialHandler>,
 }
 
 #[tool_router]
@@ -202,6 +208,7 @@ impl SerialHandler {
         Self {
             connections: Arc::new(ConnectionManager::new()),
             tool_router: Self::tool_router(),
+            prompt_router: Self::prompt_router(),
         }
     }
 
@@ -591,19 +598,144 @@ impl Default for SerialHandler {
     }
 }
 
+// ---- Prompt templates ------------------------------------------------------
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct DiagnosePortArgs {
+    /// OS-level port name to probe (e.g. "COM3", "/dev/ttyUSB0").
+    pub port: String,
+    /// Optional baud rate to try first. Defaults are tried otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baud_rate: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct InteractiveTerminalArgs {
+    /// Existing connection_id returned by the `open` tool.
+    pub connection_id: String,
+    /// Optional line ending to append when writing user-typed lines.
+    /// Defaults to `\r\n`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_ending: Option<String>,
+    /// Optional prompt the device emits at the end of each response
+    /// (e.g. "OK>", "$ "). Used by `wait_for` between commands.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_prompt: Option<String>,
+}
+
+#[prompt_router]
+impl SerialHandler {
+    /// Walk through diagnosing an unknown serial port: try common baud
+    /// rates, send a benign probe, observe response, narrow down config.
+    #[prompt(
+        name = "diagnose_port",
+        description = "Step-by-step plan to identify an unknown serial device on a given port"
+    )]
+    async fn diagnose_port_prompt(
+        &self,
+        Parameters(args): Parameters<DiagnosePortArgs>,
+        _ctx: RequestContext<RoleServer>,
+    ) -> Result<GetPromptResult, McpError> {
+        let starting = args
+            .baud_rate
+            .map(|b| b.to_string())
+            .unwrap_or_else(|| "115200".into());
+        let user = format!(
+            "Diagnose what's on serial port `{port}`. Use the serial MCP tools.\n\
+\n\
+Plan:\n\
+1. Call `list_ports` and confirm `{port}` is present; if not, stop and report.\n\
+2. Open the port with `open(port=\"{port}\", baud_rate={starting})`. If it fails, try \
+9600, 38400, 115200, 230400, 460800 in turn until one succeeds.\n\
+3. Call `read(connection_id, timeout_ms=500, max_bytes=512)` to sample unsolicited \
+output. Many devices print a banner on boot or when DTR toggles.\n\
+4. If silent, toggle DTR with `set_dtr_rts(connection_id, dtr=false, rts=false)` then \
+`set_dtr_rts(connection_id, dtr=true, rts=true)` to soft-reset Arduino-style boards, \
+and re-read.\n\
+5. If still silent, send a benign probe via `write(connection_id, data=\"AT\\r\\n\", \
+encoding=\"utf8\")` then `wait_for(connection_id, pattern=\"OK\", timeout_ms=1000)`. \
+Try `?\\r\\n`, `help\\r\\n`, `\\r\\n` as alternatives.\n\
+6. From the captured bytes, characterise the device: BOM/banner string, presence of \
+ANSI escapes, hex-only output, line-ending convention.\n\
+7. Close the connection cleanly with `close(connection_id)` before reporting.\n\
+\n\
+Report: device identification (vendor, role, protocol), the working serial parameters \
+(baud rate + framing), the prompt string (if any), and any anomalies.",
+            port = args.port,
+            starting = starting
+        );
+        Ok(GetPromptResult::new(vec![PromptMessage::new_text(
+            PromptMessageRole::User,
+            user,
+        )])
+        .with_description(format!("Diagnosis plan for port {}", args.port)))
+    }
+
+    /// Guide an interactive serial REPL session against an already-open
+    /// connection, using `write` / `wait_for` to drive a command/response
+    /// loop.
+    #[prompt(
+        name = "interactive_terminal",
+        description = "Run a REPL-style command/response session over an open serial connection"
+    )]
+    async fn interactive_terminal_prompt(
+        &self,
+        Parameters(args): Parameters<InteractiveTerminalArgs>,
+        _ctx: RequestContext<RoleServer>,
+    ) -> Result<GetPromptResult, McpError> {
+        let line_ending = args.line_ending.as_deref().unwrap_or("\\r\\n");
+        let device_prompt = args
+            .device_prompt
+            .as_deref()
+            .map(|p| format!("`{}`", p))
+            .unwrap_or_else(|| "the device's prompt string (e.g. `OK>`, `$ `)".to_string());
+        let user = format!(
+            "Act as a serial terminal client against connection `{id}`. Use the serial \
+MCP tools. Conventions:\n\
+\n\
+- Append `{line_ending}` to every line the user wants to send.\n\
+- After each `write`, call `wait_for(connection_id=\"{id}\", pattern={prompt}, \
+timeout_ms=2000)` to read the response up to {prompt}.\n\
+- If `wait_for` reports `timed_out=true`, surface the partial buffer and ask the user \
+how to proceed instead of retrying blindly.\n\
+- Decode the response data as UTF-8 unless it contains bytes the codec rejects, in \
+which case fall back to hex and tell the user.\n\
+- Never call `close` unless the user explicitly says so.\n\
+- If the connection vanishes (tool returns Connection ID not found), tell the user \
+and stop; do not silently reopen.\n\
+\n\
+Begin by sending an empty line (write `{line_ending}` then wait_for) to surface the \
+current prompt, then report back and wait for the user's first command.",
+            id = args.connection_id,
+            line_ending = line_ending,
+            prompt = device_prompt
+        );
+        Ok(GetPromptResult::new(vec![PromptMessage::new_text(
+            PromptMessageRole::User,
+            user,
+        )])
+        .with_description(format!(
+            "Interactive REPL session over connection {}",
+            args.connection_id
+        )))
+    }
+}
+
 #[tool_handler]
+#[prompt_handler]
 impl ServerHandler for SerialHandler {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(
             ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
+                .enable_prompts()
                 .build(),
         )
         .with_server_info(Implementation::from_build_env())
         .with_protocol_version(ProtocolVersion::V_2024_11_05)
         .with_instructions(
-            "A serial port communication MCP server. Use list_ports to discover available serial ports, then open connections to communicate with serial devices. Resources: serial://ports (live port list), serial://connections (open connections), serial://connections/{id} (per-connection state)."
+            "A serial port communication MCP server. Use list_ports to discover available serial ports, then open connections to communicate with serial devices. Resources: serial://ports, serial://connections, serial://connections/{id}. Prompts: diagnose_port, interactive_terminal."
                 .to_string(),
         )
     }
@@ -902,6 +1034,14 @@ mod tests {
             ResourceUriKind::Unknown
         );
         assert_eq!(parse_resource_uri("https://example.com"), ResourceUriKind::Unknown);
+    }
+
+    #[test]
+    fn prompt_router_advertises_both_prompts() {
+        let router = SerialHandler::prompt_router();
+        assert!(router.has_route("diagnose_port"));
+        assert!(router.has_route("interactive_terminal"));
+        assert_eq!(router.list_all().len(), 2);
     }
 
     #[tokio::test]
