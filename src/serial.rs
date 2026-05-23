@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serialport::{available_ports, SerialPortInfo, SerialPortType};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -116,7 +117,7 @@ pub struct ConnectionConfig {
 // ---- Port enumeration --------------------------------------------------------
 
 /// Information about a serial port reported by the OS.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct PortInfo {
     pub name: String,
     pub description: String,

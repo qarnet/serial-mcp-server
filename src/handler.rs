@@ -1,8 +1,8 @@
 //! MCP server tool surface for serial communication.
 //!
-//! Each `#[tool]` method below corresponds to one MCP tool. The methods are
-//! kept small by delegating connection lookups, parsing, and response
-//! formatting to helpers further down in the file.
+//! Each `#[tool]` method below corresponds to one MCP tool. Tools return
+//! structured JSON via [`Json<T>`] so MCP clients can index fields directly
+//! instead of parsing free-form text.
 
 use std::sync::Arc;
 
@@ -10,10 +10,10 @@ use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::*,
     service::RequestContext,
-    tool, tool_handler, tool_router, ErrorData as McpError, RoleServer, ServerHandler,
+    tool, tool_handler, tool_router, ErrorData as McpError, Json, RoleServer, ServerHandler,
 };
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info};
 
 use crate::codec::{self, Encoding};
@@ -23,7 +23,7 @@ use crate::serial::{
     StopBits,
 };
 
-/// Default read timeout used in response text when the caller did not specify one.
+/// Default read timeout used in the response when the caller did not specify one.
 const DEFAULT_READ_TIMEOUT_MS: u64 = 1000;
 
 // ---- Tool argument structs --------------------------------------------------
@@ -73,6 +73,43 @@ fn default_flow_control() -> String { "none".into() }
 fn default_encoding() -> String { "utf8".into() }
 fn default_max_bytes() -> usize { 1024 }
 
+// ---- Tool response structs --------------------------------------------------
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ListPortsResult {
+    pub count: usize,
+    pub ports: Vec<PortInfo>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct OpenResult {
+    pub connection_id: String,
+    pub port: String,
+    pub baud_rate: u32,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CloseResult {
+    pub connection_id: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct WriteResult {
+    pub connection_id: String,
+    pub bytes_written: usize,
+    pub encoding: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ReadResult {
+    pub connection_id: String,
+    pub bytes_read: usize,
+    pub encoding: String,
+    pub data: String,
+    pub timed_out: bool,
+    pub timeout_ms: u64,
+}
+
 // ---- Handler ---------------------------------------------------------------
 
 #[derive(Clone)]
@@ -92,36 +129,36 @@ impl SerialHandler {
     }
 
     #[tool(description = "List all available serial ports on the system")]
-    async fn list_ports(&self) -> Result<CallToolResult, McpError> {
+    async fn list_ports(&self) -> Result<Json<ListPortsResult>, McpError> {
         debug!("Listing serial ports");
         let ports = PortInfo::list_available()
             .map_err(|e| log_and_internal_err("list_ports", "Failed to list ports", e))?;
         info!("Found {} serial ports", ports.len());
-        Ok(success(format_port_list(&ports)))
+        Ok(Json(ListPortsResult { count: ports.len(), ports }))
     }
 
     #[tool(description = "Open a serial port connection with specified configuration")]
     async fn open(
         &self,
         Parameters(args): Parameters<OpenArgs>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<Json<OpenResult>, McpError> {
         let config = parse_open_args(args).map_err(internal_err)?;
         let port = config.port.clone();
         let baud_rate = config.baud_rate;
         debug!("Opening {} @ {}", port, baud_rate);
 
-        let id = self.connections.open(config).await.map_err(|e| {
+        let connection_id = self.connections.open(config).await.map_err(|e| {
             log_and_internal_err("open", &format!("Failed to open port {}", port), e)
         })?;
-        info!("Opened connection {} -> {}", id, port);
-        Ok(success(format_open_result(&id, &port, baud_rate)))
+        info!("Opened connection {} -> {}", connection_id, port);
+        Ok(Json(OpenResult { connection_id, port, baud_rate }))
     }
 
     #[tool(description = "Close an open serial port connection")]
     async fn close(
         &self,
         Parameters(args): Parameters<CloseArgs>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<Json<CloseResult>, McpError> {
         debug!("Closing {}", args.connection_id);
         self.connections.close(&args.connection_id).await.map_err(|e| {
             log_and_internal_err(
@@ -131,40 +168,44 @@ impl SerialHandler {
             )
         })?;
         info!("Closed connection {}", args.connection_id);
-        Ok(success(format_close_result(&args.connection_id)))
+        Ok(Json(CloseResult { connection_id: args.connection_id }))
     }
 
     #[tool(description = "Write data to a serial port connection")]
     async fn write(
         &self,
         Parameters(args): Parameters<WriteArgs>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<Json<WriteResult>, McpError> {
         debug!("Write to {} ({})", args.connection_id, args.encoding);
         let encoding = parse_encoding(&args.encoding)?;
         let connection = self.lookup_connection(&args.connection_id).await?;
         let bytes = codec::decode(encoding, &args.data)
             .map_err(|e| internal_err(format!("Data decoding failed - {}", e)))?;
-        let written = connection.write(&bytes).await.map_err(|e| {
+        let bytes_written = connection.write(&bytes).await.map_err(|e| {
             log_and_internal_err(
                 "write",
                 &format!("Data sending failed on {}", args.connection_id),
                 e,
             )
         })?;
-        debug!("Wrote {} bytes to {}", written, args.connection_id);
-        Ok(success(format_write_result(&args.connection_id, written, &args.data)))
+        debug!("Wrote {} bytes to {}", bytes_written, args.connection_id);
+        Ok(Json(WriteResult {
+            connection_id: args.connection_id,
+            bytes_written,
+            encoding: encoding.to_string(),
+        }))
     }
 
     #[tool(description = "Read data from a serial port connection")]
     async fn read(
         &self,
         Parameters(args): Parameters<ReadArgs>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<Json<ReadResult>, McpError> {
         debug!("Read from {} (timeout {:?})", args.connection_id, args.timeout_ms);
         let encoding = parse_encoding(&args.encoding)?;
         let connection = self.lookup_connection(&args.connection_id).await?;
         let outcome = read_bytes(&connection, args.max_bytes, args.timeout_ms).await?;
-        format_read_outcome(outcome, &args.connection_id, encoding, args.timeout_ms)
+        build_read_result(outcome, args.connection_id, encoding, args.timeout_ms)
     }
 }
 
@@ -181,9 +222,8 @@ impl SerialHandler {
 
 // ---- Tool helpers (free fns) ------------------------------------------------
 
-/// Outcome of a successful read call, distinguishing actual data from an
-/// empty buffer (which serial ports report on timeout when no `timeout_ms`
-/// was set or when the OS reports EOF).
+/// Outcome of a read call. `timed_out` distinguishes the genuine
+/// read-timeout case from a successful read of `bytes`.
 struct ReadOutcome {
     bytes: Vec<u8>,
     timed_out: bool,
@@ -205,18 +245,34 @@ async fn read_bytes(
     }
 }
 
-fn format_read_outcome(
+fn build_read_result(
     outcome: ReadOutcome,
-    connection_id: &str,
+    connection_id: String,
     encoding: Encoding,
-    timeout_ms: Option<u64>,
-) -> Result<CallToolResult, McpError> {
+    requested_timeout_ms: Option<u64>,
+) -> Result<Json<ReadResult>, McpError> {
+    let timeout_ms = requested_timeout_ms.unwrap_or(DEFAULT_READ_TIMEOUT_MS);
     if outcome.timed_out {
-        return Ok(success(format_read_timeout(connection_id, timeout_ms)));
+        return Ok(Json(ReadResult {
+            connection_id,
+            bytes_read: 0,
+            encoding: encoding.to_string(),
+            data: String::new(),
+            timed_out: true,
+            timeout_ms,
+        }));
     }
-    let encoded = codec::encode(encoding, &outcome.bytes)
+    let bytes_read = outcome.bytes.len();
+    let data = codec::encode(encoding, &outcome.bytes)
         .map_err(|e| internal_err(format!("Data encoding failed - {}", e)))?;
-    Ok(success(format_read_ok(connection_id, outcome.bytes.len(), &encoded)))
+    Ok(Json(ReadResult {
+        connection_id,
+        bytes_read,
+        encoding: encoding.to_string(),
+        data,
+        timed_out: false,
+        timeout_ms,
+    }))
 }
 
 fn parse_encoding(raw: &str) -> Result<Encoding, McpError> {
@@ -224,8 +280,8 @@ fn parse_encoding(raw: &str) -> Result<Encoding, McpError> {
         .map_err(|e| internal_err(format!("Unsupported encoding - {}", e)))
 }
 
-/// Strictly parse [`OpenArgs`] into a [`ConnectionConfig`]. Unlike the
-/// previous silent-fallback version, an unrecognised value here is an error.
+/// Strictly parse [`OpenArgs`] into a [`ConnectionConfig`]. An unrecognised
+/// value here is an error rather than a silent fallback to defaults.
 fn parse_open_args(args: OpenArgs) -> Result<ConnectionConfig, String> {
     Ok(ConnectionConfig {
         port: args.port,
@@ -276,61 +332,7 @@ fn parse_flow_control(raw: &str) -> Result<FlowControl, String> {
     }
 }
 
-// ---- Response formatting (pure) --------------------------------------------
-
-fn format_port_list(ports: &[PortInfo]) -> String {
-    if ports.is_empty() {
-        return "No serial ports found on the system".to_string();
-    }
-    let lines: Vec<String> = ports.iter().map(format_port_line).collect();
-    format!("Found {} serial ports:\n{}", ports.len(), lines.join("\n"))
-}
-
-fn format_port_line(port: &PortInfo) -> String {
-    match &port.hardware_id {
-        Some(hw) => format!("- {}: {} ({})", port.name, port.description, hw),
-        None => format!("- {}: {}", port.name, port.description),
-    }
-}
-
-fn format_open_result(id: &str, port: &str, baud_rate: u32) -> String {
-    format!(
-        "Serial connection opened\nConnection ID: {}\nPort: {}\nBaud rate: {}",
-        id, port, baud_rate
-    )
-}
-
-fn format_close_result(id: &str) -> String {
-    format!("Serial connection closed\nConnection ID: {}", id)
-}
-
-fn format_write_result(id: &str, bytes_written: usize, original_data: &str) -> String {
-    format!(
-        "Data sent successfully\nConnection ID: {}\nBytes written: {}\nData: {:?}",
-        id, bytes_written, original_data
-    )
-}
-
-fn format_read_ok(id: &str, bytes_read: usize, encoded: &str) -> String {
-    format!(
-        "Data read successfully\nConnection ID: {}\nBytes read: {}\nData: {:?}",
-        id, bytes_read, encoded
-    )
-}
-
-fn format_read_timeout(id: &str, timeout_ms: Option<u64>) -> String {
-    format!(
-        "Read timeout\nConnection ID: {}\nTimeout: {}ms\nBytes read: 0",
-        id,
-        timeout_ms.unwrap_or(DEFAULT_READ_TIMEOUT_MS)
-    )
-}
-
-// ---- Tiny error / result builders -------------------------------------------
-
-fn success(text: String) -> CallToolResult {
-    CallToolResult::success(vec![Content::text(text)])
-}
+// ---- Tiny error builders ----------------------------------------------------
 
 fn internal_err<M: Into<String>>(message: M) -> McpError {
     McpError::internal_error(format!("Error: {}", message.into()), None)
@@ -412,49 +414,38 @@ mod tests {
     }
 
     #[test]
-    fn format_port_list_empty() {
-        assert_eq!(
-            format_port_list(&[]),
-            "No serial ports found on the system"
-        );
-    }
-
-    #[test]
-    fn format_port_list_with_entries() {
-        let ports = vec![
-            PortInfo {
-                name: "COM1".into(),
-                description: "Serial Port".into(),
-                hardware_id: None,
-            },
-            PortInfo {
-                name: "COM3".into(),
-                description: "USB Serial Device".into(),
-                hardware_id: Some("USB VID:1234 PID:5678".into()),
-            },
-        ];
-        let rendered = format_port_list(&ports);
-        assert!(rendered.starts_with("Found 2 serial ports:\n"));
-        assert!(rendered.contains("- COM1: Serial Port"));
-        assert!(rendered.contains("- COM3: USB Serial Device (USB VID:1234 PID:5678)"));
-    }
-
-    #[test]
-    fn format_read_timeout_uses_default_when_unset() {
-        let text = format_read_timeout("conn-123", None);
-        assert!(text.contains(&format!("{}ms", DEFAULT_READ_TIMEOUT_MS)));
-        assert!(text.contains("conn-123"));
-    }
-
-    #[test]
-    fn format_read_timeout_uses_supplied_value() {
-        let text = format_read_timeout("conn-123", Some(50));
-        assert!(text.contains("50ms"));
-    }
-
-    #[test]
     fn parse_encoding_rejects_garbage() {
         assert!(parse_encoding("rot13").is_err());
         assert!(parse_encoding("utf-8").is_ok());
+    }
+
+    #[test]
+    fn build_read_result_timeout_branch() {
+        let outcome = ReadOutcome { bytes: Vec::new(), timed_out: true };
+        let Json(result) = build_read_result(outcome, "abc".into(), Encoding::Utf8, Some(250))
+            .expect("timeout result must build");
+        assert!(result.timed_out);
+        assert_eq!(result.bytes_read, 0);
+        assert_eq!(result.timeout_ms, 250);
+        assert!(result.data.is_empty());
+    }
+
+    #[test]
+    fn build_read_result_timeout_uses_default() {
+        let outcome = ReadOutcome { bytes: Vec::new(), timed_out: true };
+        let Json(result) = build_read_result(outcome, "abc".into(), Encoding::Hex, None)
+            .expect("timeout result must build");
+        assert_eq!(result.timeout_ms, DEFAULT_READ_TIMEOUT_MS);
+    }
+
+    #[test]
+    fn build_read_result_data_branch_encodes_hex() {
+        let outcome = ReadOutcome { bytes: b"Hi".to_vec(), timed_out: false };
+        let Json(result) = build_read_result(outcome, "abc".into(), Encoding::Hex, Some(500))
+            .expect("data result must build");
+        assert!(!result.timed_out);
+        assert_eq!(result.bytes_read, 2);
+        assert_eq!(result.encoding, "hex");
+        assert_eq!(result.data, "48 69");
     }
 }
