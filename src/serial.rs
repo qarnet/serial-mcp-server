@@ -405,6 +405,27 @@ impl ConnectionManager {
             .cloned()
             .ok_or_else(|| SerialError::InvalidConnection(id.to_string()))
     }
+
+    /// Lightweight snapshot of all currently-open connections. Cheap because
+    /// it only clones the id + port pair, not the underlying IO.
+    pub async fn list_open(&self) -> Vec<ConnectionSummary> {
+        self.connections
+            .lock()
+            .await
+            .values()
+            .map(|c| ConnectionSummary {
+                connection_id: c.id().to_string(),
+                port: c.port().to_string(),
+            })
+            .collect()
+    }
+}
+
+/// Public-facing summary of an open connection.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ConnectionSummary {
+    pub connection_id: String,
+    pub port: String,
 }
 
 fn is_port_in_use(

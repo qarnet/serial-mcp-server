@@ -20,8 +20,8 @@ use tracing::{debug, error, info};
 use crate::codec::{self, Encoding};
 use crate::error::SerialError;
 use crate::serial::{
-    ConnectionConfig, ConnectionManager, DataBits, FlowControl, FlushTarget, Parity, PortInfo,
-    SerialConnection, StopBits,
+    ConnectionConfig, ConnectionManager, ConnectionSummary, DataBits, FlowControl, FlushTarget,
+    Parity, PortInfo, SerialConnection, StopBits,
 };
 
 /// Default read timeout used in the response when the caller did not specify one.
@@ -594,13 +594,18 @@ impl Default for SerialHandler {
 #[tool_handler]
 impl ServerHandler for SerialHandler {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::from_build_env())
-            .with_protocol_version(ProtocolVersion::V_2024_11_05)
-            .with_instructions(
-                "A serial port communication MCP server. Use list_ports to discover available serial ports, then open connections to communicate with serial devices."
-                    .to_string(),
-            )
+        ServerInfo::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .build(),
+        )
+        .with_server_info(Implementation::from_build_env())
+        .with_protocol_version(ProtocolVersion::V_2024_11_05)
+        .with_instructions(
+            "A serial port communication MCP server. Use list_ports to discover available serial ports, then open connections to communicate with serial devices. Resources: serial://ports (live port list), serial://connections (open connections), serial://connections/{id} (per-connection state)."
+                .to_string(),
+        )
     }
 
     async fn initialize(
@@ -611,6 +616,141 @@ impl ServerHandler for SerialHandler {
         info!("Serial MCP server initialized");
         Ok(self.get_info())
     }
+
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _ctx: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, McpError> {
+        Ok(ListResourcesResult {
+            resources: vec![
+                RawResource::new(URI_PORTS, "Available serial ports")
+                    .with_description(
+                        "JSON list of serial ports the OS currently exposes."
+                            .to_string(),
+                    )
+                    .with_mime_type("application/json".to_string())
+                    .no_annotation(),
+                RawResource::new(URI_CONNECTIONS, "Open serial connections")
+                    .with_description(
+                        "JSON list of serial connections currently held open by this server."
+                            .to_string(),
+                    )
+                    .with_mime_type("application/json".to_string())
+                    .no_annotation(),
+            ],
+            next_cursor: None,
+            meta: None,
+        })
+    }
+
+    async fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _ctx: RequestContext<RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, McpError> {
+        Ok(ListResourceTemplatesResult {
+            resource_templates: vec![RawResourceTemplate::new(
+                URI_CONNECTION_TEMPLATE,
+                "Open serial connection by id",
+            )
+            .with_description(
+                "Per-connection state. Substitute {id} with a connection_id returned by the open tool."
+                    .to_string(),
+            )
+            .with_mime_type("application/json".to_string())
+            .no_annotation()],
+            next_cursor: None,
+            meta: None,
+        })
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _ctx: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResult, McpError> {
+        let uri = request.uri;
+        match parse_resource_uri(&uri) {
+            ResourceUriKind::Ports => {
+                let ports = PortInfo::list_available()
+                    .map_err(|e| McpError::internal_error(format!("Failed to list ports: {}", e), None))?;
+                let body = serde_json::to_string_pretty(&ListPortsResult {
+                    count: ports.len(),
+                    ports,
+                })
+                .map_err(|e| McpError::internal_error(format!("serialize: {}", e), None))?;
+                Ok(ReadResourceResult::new(vec![
+                    ResourceContents::text(body, uri).with_mime_type("application/json"),
+                ]))
+            }
+            ResourceUriKind::ConnectionsList => {
+                let summaries = self.connections.list_open().await;
+                let body = serde_json::to_string_pretty(&ConnectionsResource {
+                    count: summaries.len(),
+                    connections: summaries,
+                })
+                .map_err(|e| McpError::internal_error(format!("serialize: {}", e), None))?;
+                Ok(ReadResourceResult::new(vec![
+                    ResourceContents::text(body, uri).with_mime_type("application/json"),
+                ]))
+            }
+            ResourceUriKind::ConnectionDetail(id) => {
+                let conn = self.connections.get(&id).await.map_err(|_| {
+                    McpError::resource_not_found(
+                        "connection_not_found",
+                        Some(serde_json::json!({ "uri": uri, "connection_id": id })),
+                    )
+                })?;
+                let body = serde_json::to_string_pretty(&ConnectionSummary {
+                    connection_id: conn.id().to_string(),
+                    port: conn.port().to_string(),
+                })
+                .map_err(|e| McpError::internal_error(format!("serialize: {}", e), None))?;
+                Ok(ReadResourceResult::new(vec![
+                    ResourceContents::text(body, uri).with_mime_type("application/json"),
+                ]))
+            }
+            ResourceUriKind::Unknown => Err(McpError::resource_not_found(
+                "resource_not_found",
+                Some(serde_json::json!({ "uri": uri })),
+            )),
+        }
+    }
+}
+
+// ---- Resource URI handling --------------------------------------------------
+
+const URI_PORTS: &str = "serial://ports";
+const URI_CONNECTIONS: &str = "serial://connections";
+const URI_CONNECTION_PREFIX: &str = "serial://connections/";
+const URI_CONNECTION_TEMPLATE: &str = "serial://connections/{id}";
+
+#[derive(Debug, PartialEq, Eq)]
+enum ResourceUriKind {
+    Ports,
+    ConnectionsList,
+    ConnectionDetail(String),
+    Unknown,
+}
+
+fn parse_resource_uri(uri: &str) -> ResourceUriKind {
+    match uri {
+        URI_PORTS => ResourceUriKind::Ports,
+        URI_CONNECTIONS => ResourceUriKind::ConnectionsList,
+        other => match other.strip_prefix(URI_CONNECTION_PREFIX) {
+            Some(id) if !id.is_empty() && !id.contains('/') => {
+                ResourceUriKind::ConnectionDetail(id.to_string())
+            }
+            _ => ResourceUriKind::Unknown,
+        },
+    }
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct ConnectionsResource {
+    count: usize,
+    connections: Vec<ConnectionSummary>,
 }
 
 #[cfg(test)]
@@ -738,6 +878,30 @@ mod tests {
         assert!(outcome.timed_out);
         assert!(outcome.match_index.is_none());
         assert!(outcome.bytes.windows(3).all(|w| w != b"OK>"));
+    }
+
+    #[test]
+    fn resource_uri_known_targets() {
+        assert_eq!(parse_resource_uri("serial://ports"), ResourceUriKind::Ports);
+        assert_eq!(
+            parse_resource_uri("serial://connections"),
+            ResourceUriKind::ConnectionsList
+        );
+        assert_eq!(
+            parse_resource_uri("serial://connections/abc-123"),
+            ResourceUriKind::ConnectionDetail("abc-123".into())
+        );
+    }
+
+    #[test]
+    fn resource_uri_unknown_targets() {
+        assert_eq!(parse_resource_uri("serial://other"), ResourceUriKind::Unknown);
+        assert_eq!(parse_resource_uri("serial://connections/"), ResourceUriKind::Unknown);
+        assert_eq!(
+            parse_resource_uri("serial://connections/abc/extra"),
+            ResourceUriKind::Unknown
+        );
+        assert_eq!(parse_resource_uri("https://example.com"), ResourceUriKind::Unknown);
     }
 
     #[tokio::test]
