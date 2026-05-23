@@ -16,6 +16,8 @@ use rmcp::{
     model::*,
     prompt, prompt_handler, prompt_router,
     service::{Peer, RequestContext},
+    task_handler,
+    task_manager::OperationProcessor,
     tool, tool_handler, tool_router, ErrorData as McpError, Json, RoleServer, ServerHandler,
 };
 use schemars::JsonSchema;
@@ -237,6 +239,11 @@ pub struct SerialHandler {
     /// Per-connection background RX-streaming tasks, indexed by connection id.
     /// Dropping a handle aborts the task.
     streams: Arc<tokio::sync::Mutex<HashMap<String, StreamHandle>>>,
+    /// MCP task manager for opt-in long-running tool invocations
+    /// (read, wait_for, send_break). Clients can submit those tools as
+    /// tasks and cancel them via the standard MCP tasks/cancel request.
+    #[allow(dead_code)]
+    processor: Arc<tokio::sync::Mutex<OperationProcessor>>,
     #[allow(dead_code)]
     tool_router: ToolRouter<SerialHandler>,
     #[allow(dead_code)]
@@ -260,6 +267,7 @@ impl SerialHandler {
         Self {
             connections: Arc::new(ConnectionManager::new()),
             streams: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            processor: Arc::new(tokio::sync::Mutex::new(OperationProcessor::new())),
             tool_router: Self::tool_router(),
             prompt_router: Self::prompt_router(),
         }
@@ -333,7 +341,10 @@ impl SerialHandler {
         }))
     }
 
-    #[tool(description = "Read data from a serial port connection")]
+    #[tool(
+        description = "Read data from a serial port connection",
+        execution(task_support = "optional")
+    )]
     async fn read(
         &self,
         Parameters(args): Parameters<ReadArgs>,
@@ -390,7 +401,8 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Assert a BREAK condition on the TX line for duration_ms milliseconds (default 250ms), then release it. Used to signal attention on some legacy serial protocols."
+        description = "Assert a BREAK condition on the TX line for duration_ms milliseconds (default 250ms), then release it. Used to signal attention on some legacy serial protocols.",
+        execution(task_support = "optional")
     )]
     async fn send_break(
         &self,
@@ -463,7 +475,8 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Read bytes from a connection until a pattern matches or timeout. Pattern is interpreted with pattern_encoding (utf8/hex/base64). Returns the accumulated bytes (re-encoded with response_encoding) and the byte offset where the match started. Use for prompt/response interactions, e.g. send 'reset\\r\\n' then wait_for pattern='OK>'."
+        description = "Read bytes from a connection until a pattern matches or timeout. Pattern is interpreted with pattern_encoding (utf8/hex/base64). Returns the accumulated bytes (re-encoded with response_encoding) and the byte offset where the match started. Use for prompt/response interactions, e.g. send 'reset\\r\\n' then wait_for pattern='OK>'.",
+        execution(task_support = "optional")
     )]
     async fn wait_for(
         &self,
@@ -872,6 +885,7 @@ current prompt, then report back and wait for the user's first command.",
 
 #[tool_handler]
 #[prompt_handler]
+#[task_handler]
 impl ServerHandler for SerialHandler {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(
