@@ -4,6 +4,7 @@
 //! structured JSON via [`Json<T>`] so MCP clients can index fields directly
 //! instead of parsing free-form text.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -14,7 +15,7 @@ use rmcp::{
     },
     model::*,
     prompt, prompt_handler, prompt_router,
-    service::RequestContext,
+    service::{Peer, RequestContext},
     tool, tool_handler, tool_router, ErrorData as McpError, Json, RoleServer, ServerHandler,
 };
 use schemars::JsonSchema;
@@ -93,6 +94,22 @@ pub struct SendBreakArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct SubscribeArgs {
+    pub connection_id: String,
+    #[serde(default = "default_encoding")]
+    pub encoding: String,
+    #[serde(default = "default_subscribe_chunk_bytes")]
+    pub max_chunk_bytes: usize,
+    #[serde(default = "default_subscribe_poll_ms")]
+    pub poll_interval_ms: u64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct UnsubscribeArgs {
+    pub connection_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct WaitForArgs {
     pub connection_id: String,
     /// Byte pattern to wait for, in the encoding given by `pattern_encoding`.
@@ -117,6 +134,8 @@ fn default_flush_target() -> FlushTarget { FlushTarget::Both }
 fn default_break_duration_ms() -> u64 { 250 }
 fn default_wait_timeout_ms() -> u64 { 5000 }
 fn default_wait_max_bytes() -> usize { 4096 }
+fn default_subscribe_chunk_bytes() -> usize { 1024 }
+fn default_subscribe_poll_ms() -> u64 { 200 }
 
 // ---- Tool response structs --------------------------------------------------
 
@@ -175,6 +194,25 @@ pub struct SendBreakResult {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
+pub struct SubscribeResult {
+    pub connection_id: String,
+    pub encoding: String,
+    pub max_chunk_bytes: usize,
+    pub poll_interval_ms: u64,
+    /// True if a prior subscription was active for this connection and has
+    /// been replaced by the new one.
+    pub replaced_previous: bool,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct UnsubscribeResult {
+    pub connection_id: String,
+    /// True if a subscription was active and has now been cancelled. False
+    /// if no subscription existed.
+    pub was_active: bool,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct WaitForResult {
     pub connection_id: String,
     pub matched: bool,
@@ -196,10 +234,24 @@ pub struct WaitForResult {
 #[derive(Clone)]
 pub struct SerialHandler {
     connections: Arc<ConnectionManager>,
+    /// Per-connection background RX-streaming tasks, indexed by connection id.
+    /// Dropping a handle aborts the task.
+    streams: Arc<tokio::sync::Mutex<HashMap<String, StreamHandle>>>,
     #[allow(dead_code)]
     tool_router: ToolRouter<SerialHandler>,
     #[allow(dead_code)]
     prompt_router: PromptRouter<SerialHandler>,
+}
+
+/// RAII wrapper around a streaming task. Aborts the task on drop.
+struct StreamHandle {
+    join: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for StreamHandle {
+    fn drop(&mut self) {
+        self.join.abort();
+    }
 }
 
 #[tool_router]
@@ -207,6 +259,7 @@ impl SerialHandler {
     pub fn new() -> Self {
         Self {
             connections: Arc::new(ConnectionManager::new()),
+            streams: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             tool_router: Self::tool_router(),
             prompt_router: Self::prompt_router(),
         }
@@ -360,6 +413,56 @@ impl SerialHandler {
     }
 
     #[tool(
+        description = "Subscribe to a connection: a background task reads bytes in chunks and forwards them to the client as MCP `notifications/message` events with logger=\"serial:<connection_id>\". Replaces any prior subscription on the same connection. Stop with unsubscribe or by closing the connection."
+    )]
+    async fn subscribe(
+        &self,
+        Parameters(args): Parameters<SubscribeArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<Json<SubscribeResult>, String> {
+        debug!(
+            "subscribe {} encoding={} chunk={} poll={}",
+            args.connection_id, args.encoding, args.max_chunk_bytes, args.poll_interval_ms
+        );
+        let encoding = parse_encoding(&args.encoding)?;
+        let connection = self.lookup_connection(&args.connection_id).await?;
+        let peer = ctx.peer.clone();
+
+        let id = args.connection_id.clone();
+        let chunk_bytes = args.max_chunk_bytes;
+        let poll_ms = args.poll_interval_ms;
+        let join = tokio::spawn(stream_rx(peer, connection, encoding, chunk_bytes, poll_ms));
+
+        let mut streams = self.streams.lock().await;
+        let replaced_previous = streams.insert(id.clone(), StreamHandle { join }).is_some();
+        info!("subscribed RX stream for {} (replaced={})", id, replaced_previous);
+        Ok(Json(SubscribeResult {
+            connection_id: id,
+            encoding: encoding.to_string(),
+            max_chunk_bytes: chunk_bytes,
+            poll_interval_ms: poll_ms,
+            replaced_previous,
+        }))
+    }
+
+    #[tool(
+        description = "Cancel an active RX subscription on a connection. No-op if no subscription exists."
+    )]
+    async fn unsubscribe(
+        &self,
+        Parameters(args): Parameters<UnsubscribeArgs>,
+    ) -> Result<Json<UnsubscribeResult>, String> {
+        debug!("unsubscribe {}", args.connection_id);
+        let mut streams = self.streams.lock().await;
+        let was_active = streams.remove(&args.connection_id).is_some();
+        info!("unsubscribed {} (was_active={})", args.connection_id, was_active);
+        Ok(Json(UnsubscribeResult {
+            connection_id: args.connection_id,
+            was_active,
+        }))
+    }
+
+    #[tool(
         description = "Read bytes from a connection until a pattern matches or timeout. Pattern is interpreted with pattern_encoding (utf8/hex/base64). Returns the accumulated bytes (re-encoded with response_encoding) and the byte offset where the match started. Use for prompt/response interactions, e.g. send 'reset\\r\\n' then wait_for pattern='OK>'."
     )]
     async fn wait_for(
@@ -430,6 +533,52 @@ async fn read_bytes(
         }
         Err(SerialError::ReadTimeout) => Ok(ReadOutcome { bytes: Vec::new(), timed_out: true }),
         Err(e) => Err(log_tool_err("read", "Data reading failed", e)),
+    }
+}
+
+/// Background RX-streaming loop. Polls the connection in small chunks and
+/// forwards every non-empty read to the connected MCP peer as a
+/// `notifications/message` event with logger=`"serial:<connection_id>"`.
+/// Exits silently when the peer disconnects or the connection errors.
+async fn stream_rx(
+    peer: Peer<RoleServer>,
+    connection: Arc<SerialConnection>,
+    encoding: Encoding,
+    max_chunk_bytes: usize,
+    poll_interval_ms: u64,
+) {
+    let logger = format!("serial:{}", connection.id());
+    let mut buf = vec![0u8; max_chunk_bytes];
+    loop {
+        match connection.read(&mut buf, Some(poll_interval_ms)).await {
+            Ok(0) | Err(SerialError::ReadTimeout) => continue,
+            Ok(n) => {
+                let chunk = &buf[..n];
+                let encoded = match codec::encode(encoding, chunk) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let payload = serde_json::json!({
+                    "connection_id": connection.id(),
+                    "bytes_read": n,
+                    "encoding": encoding.to_string(),
+                    "data": encoded,
+                });
+                let param = LoggingMessageNotificationParam {
+                    level: LoggingLevel::Info,
+                    logger: Some(logger.clone()),
+                    data: payload,
+                };
+                if let Err(e) = peer.notify_logging_message(param).await {
+                    error!("RX stream peer disconnected: {}", e);
+                    break;
+                }
+            }
+            Err(e) => {
+                error!("RX stream read error on {}: {}", connection.id(), e);
+                break;
+            }
+        }
     }
 }
 
@@ -730,12 +879,13 @@ impl ServerHandler for SerialHandler {
                 .enable_tools()
                 .enable_resources()
                 .enable_prompts()
+                .enable_logging()
                 .build(),
         )
         .with_server_info(Implementation::from_build_env())
         .with_protocol_version(ProtocolVersion::V_2024_11_05)
         .with_instructions(
-            "A serial port communication MCP server. Use list_ports to discover available serial ports, then open connections to communicate with serial devices. Resources: serial://ports, serial://connections, serial://connections/{id}. Prompts: diagnose_port, interactive_terminal."
+            "A serial port communication MCP server. Use list_ports to discover available serial ports, then open connections to communicate with serial devices. Resources: serial://ports, serial://connections, serial://connections/{id}. Prompts: diagnose_port, interactive_terminal. Subscribe to live RX bytes with the subscribe tool; the server emits notifications/message events with logger=\"serial:<connection_id>\"."
                 .to_string(),
         )
     }
