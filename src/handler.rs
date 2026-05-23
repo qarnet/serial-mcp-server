@@ -711,4 +711,43 @@ mod tests {
     fn find_subslice_needle_longer_than_haystack() {
         assert_eq!(find_subslice(b"hi", b"hello"), None);
     }
+
+    // ---- read_until_pattern integration with the loopback backend ----------
+
+    use crate::serial::test_support::loopback_connection;
+    use tokio::io::AsyncWriteExt;
+
+    #[tokio::test]
+    async fn read_until_pattern_matches_when_pattern_arrives() {
+        let (conn, mut peer) = loopback_connection("test");
+        let writer = tokio::spawn(async move {
+            peer.write_all(b"junk before OK> and tail").await.unwrap();
+        });
+        let outcome = read_until_pattern(&conn, b"OK>", 1_000, 1024).await.unwrap();
+        writer.await.unwrap();
+        assert_eq!(outcome.match_index, Some(12));
+        assert!(!outcome.timed_out);
+        assert!(outcome.bytes.starts_with(b"junk before OK>"));
+    }
+
+    #[tokio::test]
+    async fn read_until_pattern_times_out_with_no_match() {
+        let (conn, mut peer) = loopback_connection("test");
+        peer.write_all(b"only noise here").await.unwrap();
+        let outcome = read_until_pattern(&conn, b"OK>", 60, 1024).await.unwrap();
+        assert!(outcome.timed_out);
+        assert!(outcome.match_index.is_none());
+        assert!(outcome.bytes.windows(3).all(|w| w != b"OK>"));
+    }
+
+    #[tokio::test]
+    async fn read_until_pattern_stops_at_max_bytes() {
+        let (conn, mut peer) = loopback_connection("test");
+        let blob = vec![b'.'; 600];
+        peer.write_all(&blob).await.unwrap();
+        let outcome = read_until_pattern(&conn, b"OK>", 1_000, 256).await.unwrap();
+        assert!(!outcome.timed_out);
+        assert!(outcome.match_index.is_none());
+        assert_eq!(outcome.bytes.len(), 256);
+    }
 }

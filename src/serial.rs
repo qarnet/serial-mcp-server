@@ -7,13 +7,14 @@
 //!   rejects double-opens of the same port.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serialport::{available_ports, SerialPortInfo, SerialPortType};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 use tokio_serial::{ClearBuffer, SerialPort, SerialPortBuilderExt, SerialStream};
@@ -165,15 +166,68 @@ fn describe_port(port: &SerialPortInfo) -> String {
     }
 }
 
+// ---- I/O backend trait -------------------------------------------------------
+
+/// Abstraction over the underlying byte stream plus the modem-control lines
+/// of a serial port.
+///
+/// The production backend ([`SerialStream`]) talks to a real OS-level
+/// serial port. Tests substitute an in-memory implementation backed by
+/// [`tokio::io::duplex`] so that read/write/wait_for can be exercised
+/// without any hardware.
+///
+/// Control-line operations (`clear_os_buffers`, `set_dtr_rts`,
+/// `set_break_state`) are required methods so the trait can stay
+/// object-safe even when the backend doesn't have a real port behind it;
+/// in-memory backends typically implement them as no-ops.
+pub trait SerialIo: AsyncRead + AsyncWrite + Send + Unpin {
+    fn clear_os_buffers(&self, target: FlushTarget) -> std::io::Result<()>;
+    fn set_dtr_rts(&mut self, dtr: bool, rts: bool) -> std::io::Result<()>;
+    fn set_break_state(&self, asserted: bool) -> std::io::Result<()>;
+}
+
+impl SerialIo for SerialStream {
+    fn clear_os_buffers(&self, target: FlushTarget) -> std::io::Result<()> {
+        self.clear(target.into()).map_err(io_error_from_serialport)
+    }
+
+    fn set_dtr_rts(&mut self, dtr: bool, rts: bool) -> std::io::Result<()> {
+        self.write_data_terminal_ready(dtr)
+            .map_err(io_error_from_serialport)?;
+        self.write_request_to_send(rts)
+            .map_err(io_error_from_serialport)
+    }
+
+    fn set_break_state(&self, asserted: bool) -> std::io::Result<()> {
+        if asserted {
+            self.set_break().map_err(io_error_from_serialport)
+        } else {
+            self.clear_break().map_err(io_error_from_serialport)
+        }
+    }
+}
+
+fn io_error_from_serialport(err: serialport::Error) -> std::io::Error {
+    std::io::Error::other(err.to_string())
+}
+
 // ---- Single open connection --------------------------------------------------
 
 /// A single open serial port. Cheap to clone via [`Arc`] because all state lives
 /// behind a [`Mutex`].
-#[derive(Debug)]
 pub struct SerialConnection {
     id: String,
     port: String,
-    stream: Mutex<SerialStream>,
+    io: Mutex<Box<dyn SerialIo>>,
+}
+
+impl fmt::Debug for SerialConnection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SerialConnection")
+            .field("id", &self.id)
+            .field("port", &self.port)
+            .finish()
+    }
 }
 
 impl SerialConnection {
@@ -181,11 +235,17 @@ impl SerialConnection {
     pub async fn open(config: ConnectionConfig) -> Result<Self> {
         ensure_valid_baud_rate(config.baud_rate)?;
         let stream = build_stream(&config)?;
-        Ok(Self {
+        Ok(Self::from_io(config.port, Box::new(stream)))
+    }
+
+    /// Build a connection from an arbitrary [`SerialIo`] backend. Used by
+    /// tests to inject an in-memory duplex stream.
+    pub fn from_io(port: String, io: Box<dyn SerialIo>) -> Self {
+        Self {
             id: Uuid::new_v4().to_string(),
-            port: config.port,
-            stream: Mutex::new(stream),
-        })
+            port,
+            io: Mutex::new(io),
+        }
     }
 
     pub fn id(&self) -> &str {
@@ -198,52 +258,50 @@ impl SerialConnection {
 
     /// Write a byte slice, flushing before returning.
     pub async fn write(&self, data: &[u8]) -> Result<usize> {
-        let mut stream = self.stream.lock().await;
-        let written = stream.write(data).await?;
-        stream.flush().await?;
+        let mut io = self.io.lock().await;
+        let written = io.write(data).await?;
+        io.flush().await?;
         Ok(written)
     }
 
     /// Read up to `dst.len()` bytes. Returns [`SerialError::ReadTimeout`] if
     /// `timeout_ms` is set and elapses before any byte arrives.
     pub async fn read(&self, dst: &mut [u8], timeout_ms: Option<u64>) -> Result<usize> {
-        let mut stream = self.stream.lock().await;
+        let mut io = self.io.lock().await;
         match timeout_ms {
-            Some(ms) => match timeout(Duration::from_millis(ms), stream.read(dst)).await {
+            Some(ms) => match timeout(Duration::from_millis(ms), io.read(dst)).await {
                 Ok(io_result) => Ok(io_result?),
                 Err(_elapsed) => Err(SerialError::ReadTimeout),
             },
-            None => Ok(stream.read(dst).await?),
+            None => Ok(io.read(dst).await?),
         }
     }
 
     /// Discard data buffered in the OS for the input, output, or both
     /// directions of this port.
     pub async fn flush_buffers(&self, target: FlushTarget) -> Result<()> {
-        let stream = self.stream.lock().await;
-        stream.clear(target.into()).map_err(SerialError::from)
+        let io = self.io.lock().await;
+        io.clear_os_buffers(target).map_err(SerialError::from)
     }
 
     /// Drive the DTR and RTS control lines. Common use case: pulse DTR low
     /// to soft-reset an Arduino, or hold both low to enter the ESP32
     /// bootloader.
     pub async fn set_dtr_rts(&self, dtr: bool, rts: bool) -> Result<()> {
-        let mut stream = self.stream.lock().await;
-        stream.write_data_terminal_ready(dtr)?;
-        stream.write_request_to_send(rts)?;
-        Ok(())
+        let mut io = self.io.lock().await;
+        io.set_dtr_rts(dtr, rts).map_err(SerialError::from)
     }
 
     /// Assert the BREAK condition on the TX line for `duration_ms`
     /// milliseconds, then release it.
     pub async fn send_break(&self, duration_ms: u64) -> Result<()> {
-        let stream = self.stream.lock().await;
-        stream.set_break()?;
-        drop(stream);
+        {
+            let io = self.io.lock().await;
+            io.set_break_state(true).map_err(SerialError::from)?;
+        }
         tokio::time::sleep(Duration::from_millis(duration_ms)).await;
-        let stream = self.stream.lock().await;
-        stream.clear_break()?;
-        Ok(())
+        let io = self.io.lock().await;
+        io.set_break_state(false).map_err(SerialError::from)
     }
 }
 
@@ -313,6 +371,20 @@ impl ConnectionManager {
         Ok(id)
     }
 
+    /// Test-only: insert an already-built [`SerialConnection`] (typically
+    /// one backed by an in-memory loopback) into the registry. Honors the
+    /// same port-uniqueness invariant as [`Self::open`].
+    #[cfg(test)]
+    pub(crate) async fn insert_for_test(&self, connection: SerialConnection) -> Result<String> {
+        let mut connections = self.connections.lock().await;
+        if is_port_in_use(&connections, connection.port()) {
+            return Err(SerialError::ConnectionExists(connection.port().to_string()));
+        }
+        let id = connection.id().to_string();
+        connections.insert(id.clone(), Arc::new(connection));
+        Ok(id)
+    }
+
     /// Remove a connection. The serial port is closed when the last [`Arc`]
     /// reference is dropped, which happens here if no caller still holds one.
     pub async fn close(&self, id: &str) -> Result<()> {
@@ -342,9 +414,84 @@ fn is_port_in_use(
     connections.values().any(|c| c.port() == port)
 }
 
+// ---- Test support ----------------------------------------------------------
+
+/// In-memory implementations of [`SerialIo`] used by the crate's unit tests
+/// and by `handler.rs` tests that need a fake connection.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    use tokio::io::{DuplexStream, ReadBuf};
+
+    use super::*;
+
+    /// Wraps a [`DuplexStream`] half so it satisfies the [`SerialIo`] trait.
+    /// All control-line operations are no-ops.
+    pub(crate) struct LoopbackIo(DuplexStream);
+
+    impl AsyncRead for LoopbackIo {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.0).poll_read(cx, buf)
+        }
+    }
+
+    impl AsyncWrite for LoopbackIo {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Pin::new(&mut self.0).poll_write(cx, buf)
+        }
+
+        fn poll_flush(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.0).poll_flush(cx)
+        }
+
+        fn poll_shutdown(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.0).poll_shutdown(cx)
+        }
+    }
+
+    impl SerialIo for LoopbackIo {
+        fn clear_os_buffers(&self, _target: FlushTarget) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn set_dtr_rts(&mut self, _dtr: bool, _rts: bool) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn set_break_state(&self, _asserted: bool) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Build an in-memory connection plus the peer end of the duplex.
+    /// The peer can be driven directly by the test to push bytes into the
+    /// connection's read side or to consume bytes the connection writes.
+    pub(crate) fn loopback_connection(port: &str) -> (SerialConnection, DuplexStream) {
+        let (a, b) = tokio::io::duplex(4096);
+        let conn = SerialConnection::from_io(port.to_string(), Box::new(LoopbackIo(a)));
+        (conn, b)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::test_support::loopback_connection;
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
     fn baud_rate_zero_rejected() {
@@ -367,5 +514,68 @@ mod tests {
         assert!(ensure_valid_baud_rate(115200).is_ok());
         assert!(ensure_valid_baud_rate(1).is_ok());
         assert!(ensure_valid_baud_rate(MAX_BAUD_RATE).is_ok());
+    }
+
+    #[tokio::test]
+    async fn write_pushes_bytes_to_peer() {
+        let (conn, mut peer) = loopback_connection("test");
+        let n = conn.write(b"hello").await.unwrap();
+        assert_eq!(n, 5);
+        let mut buf = [0u8; 5];
+        peer.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"hello");
+    }
+
+    #[tokio::test]
+    async fn read_returns_peer_bytes() {
+        let (conn, mut peer) = loopback_connection("test");
+        peer.write_all(b"world").await.unwrap();
+        let mut buf = [0u8; 5];
+        let n = conn.read(&mut buf, Some(500)).await.unwrap();
+        assert_eq!(n, 5);
+        assert_eq!(&buf, b"world");
+    }
+
+    #[tokio::test]
+    async fn read_times_out_when_no_data() {
+        let (conn, _peer) = loopback_connection("test");
+        let mut buf = [0u8; 16];
+        let result = conn.read(&mut buf, Some(40)).await;
+        assert!(matches!(result, Err(SerialError::ReadTimeout)));
+    }
+
+    #[tokio::test]
+    async fn flush_set_dtr_rts_send_break_are_noops_on_loopback() {
+        let (conn, _peer) = loopback_connection("test");
+        conn.flush_buffers(FlushTarget::Both).await.unwrap();
+        conn.set_dtr_rts(true, false).await.unwrap();
+        conn.send_break(15).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn manager_rejects_duplicate_port() {
+        let mgr = ConnectionManager::new();
+        let (c1, _p1) = loopback_connection("port-a");
+        mgr.insert_for_test(c1).await.unwrap();
+        let (c2, _p2) = loopback_connection("port-a");
+        let err = mgr.insert_for_test(c2).await.unwrap_err();
+        assert!(matches!(err, SerialError::ConnectionExists(_)));
+    }
+
+    #[tokio::test]
+    async fn manager_close_then_get_returns_invalid_connection() {
+        let mgr = ConnectionManager::new();
+        let (c, _p) = loopback_connection("port-z");
+        let id = mgr.insert_for_test(c).await.unwrap();
+        mgr.close(&id).await.unwrap();
+        let err = mgr.get(&id).await.unwrap_err();
+        assert!(matches!(err, SerialError::InvalidConnection(_)));
+    }
+
+    #[tokio::test]
+    async fn manager_get_unknown_id_returns_invalid_connection() {
+        let mgr = ConnectionManager::new();
+        let err = mgr.get("does-not-exist").await.unwrap_err();
+        assert!(matches!(err, SerialError::InvalidConnection(_)));
     }
 }
