@@ -332,7 +332,7 @@ impl SerialHandler {
             .connections
             .open(config)
             .await
-            .map_err(|e| log_tool_err("open", &format!("Failed to open port {}", port), e))?;
+            .map_err(|e| log_tool_err("open", &format!("Failed to open port {port}"), e))?;
         info!("Opened connection {} -> {}", connection_id, port);
         Ok(Json(OpenResult {
             connection_id,
@@ -372,7 +372,7 @@ impl SerialHandler {
         let encoding = parse_encoding(&args.encoding)?;
         let connection = self.lookup_connection(&args.connection_id).await?;
         let bytes = codec::decode(encoding, &args.data)
-            .map_err(|e| format!("Data decoding failed - {}", e))?;
+            .map_err(|e| format!("Data decoding failed - {e}"))?;
         let bytes_written = connection.write(&bytes).await.map_err(|e| {
             log_tool_err(
                 "write",
@@ -563,7 +563,7 @@ impl SerialHandler {
         let pattern_encoding = parse_encoding(&args.pattern_encoding)?;
         let response_encoding = parse_encoding(&args.response_encoding)?;
         let pattern = codec::decode(pattern_encoding, &args.pattern)
-            .map_err(|e| format!("Pattern decoding failed - {}", e))?;
+            .map_err(|e| format!("Pattern decoding failed - {e}"))?;
         if pattern.is_empty() {
             return Err("Pattern must not be empty".into());
         }
@@ -573,7 +573,7 @@ impl SerialHandler {
             read_until_pattern(&connection, &pattern, args.timeout_ms, args.max_bytes).await?;
         let bytes_read = outcome.bytes.len();
         let data = codec::encode(response_encoding, &outcome.bytes)
-            .map_err(|e| format!("Response encoding failed - {}", e))?;
+            .map_err(|e| format!("Response encoding failed - {e}"))?;
         Ok(Json(WaitForResult {
             connection_id: args.connection_id,
             matched: outcome.match_index.is_some(),
@@ -594,7 +594,7 @@ impl SerialHandler {
         self.connections
             .get(id)
             .await
-            .map_err(|_| format!("Connection ID {} not found", id))
+            .map_err(|_| format!("Connection ID {id} not found"))
     }
 }
 
@@ -769,7 +769,7 @@ fn build_read_result(
     }
     let bytes_read = outcome.bytes.len();
     let data = codec::encode(encoding, &outcome.bytes)
-        .map_err(|e| format!("Data encoding failed - {}", e))?;
+        .map_err(|e| format!("Data encoding failed - {e}"))?;
     Ok(Json(ReadResult {
         connection_id,
         bytes_read,
@@ -782,7 +782,7 @@ fn build_read_result(
 
 fn parse_encoding(raw: &str) -> Result<Encoding, String> {
     raw.parse::<Encoding>()
-        .map_err(|e| format!("Unsupported encoding - {}", e))
+        .map_err(|e| format!("Unsupported encoding - {e}"))
 }
 
 /// Strictly parse [`OpenArgs`] into a [`ConnectionConfig`]. An unrecognised
@@ -804,7 +804,7 @@ fn parse_data_bits(raw: &str) -> Result<DataBits, String> {
         "6" => Ok(DataBits::Six),
         "7" => Ok(DataBits::Seven),
         "8" => Ok(DataBits::Eight),
-        other => Err(format!("Invalid data_bits {:?} (expected 5/6/7/8)", other)),
+        other => Err(format!("Invalid data_bits {other:?} (expected 5/6/7/8)")),
     }
 }
 
@@ -812,7 +812,7 @@ fn parse_stop_bits(raw: &str) -> Result<StopBits, String> {
     match raw {
         "1" => Ok(StopBits::One),
         "2" => Ok(StopBits::Two),
-        other => Err(format!("Invalid stop_bits {:?} (expected 1/2)", other)),
+        other => Err(format!("Invalid stop_bits {other:?} (expected 1/2)")),
     }
 }
 
@@ -822,8 +822,7 @@ fn parse_parity(raw: &str) -> Result<Parity, String> {
         "odd" => Ok(Parity::Odd),
         "even" => Ok(Parity::Even),
         other => Err(format!(
-            "Invalid parity {:?} (expected none/odd/even)",
-            other
+            "Invalid parity {other:?} (expected none/odd/even)"
         )),
     }
 }
@@ -834,8 +833,7 @@ fn parse_flow_control(raw: &str) -> Result<FlowControl, String> {
         "software" => Ok(FlowControl::Software),
         "hardware" => Ok(FlowControl::Hardware),
         other => Err(format!(
-            "Invalid flow_control {:?} (expected none/software/hardware)",
-            other
+            "Invalid flow_control {other:?} (expected none/software/hardware)"
         )),
     }
 }
@@ -846,7 +844,7 @@ fn parse_flow_control(raw: &str) -> Result<FlowControl, String> {
 /// rmcp router will surface as a `CallToolResult { isError: true, ... }`.
 fn log_tool_err<E: std::fmt::Display>(op: &str, context: &str, err: E) -> String {
     error!("{} failed: {}", op, err);
-    format!("{} - {}", context, err)
+    format!("{context} - {err}")
 }
 
 // ---- ServerHandler boilerplate ----------------------------------------------
@@ -945,7 +943,7 @@ Report: device identification (vendor, role, protocol), the working serial param
         let device_prompt = args
             .device_prompt
             .as_deref()
-            .map(|p| format!("`{}`", p))
+            .map(|p| format!("`{p}`"))
             .unwrap_or_else(|| "the device's prompt string (e.g. `OK>`, `$ `)".to_string());
         let user = format!(
             "Act as a serial terminal client against connection `{id}`. Use the serial \
@@ -1067,13 +1065,13 @@ impl ServerHandler for SerialHandler {
         match parse_resource_uri(&uri) {
             ResourceUriKind::Ports => {
                 let ports = PortInfo::list_available().map_err(|e| {
-                    McpError::internal_error(format!("Failed to list ports: {}", e), None)
+                    McpError::internal_error(format!("Failed to list ports: {e}"), None)
                 })?;
                 let body = serde_json::to_string_pretty(&ListPortsResult {
                     count: ports.len(),
                     ports,
                 })
-                .map_err(|e| McpError::internal_error(format!("serialize: {}", e), None))?;
+                .map_err(|e| McpError::internal_error(format!("serialize: {e}"), None))?;
                 Ok(ReadResourceResult::new(vec![ResourceContents::text(
                     body, uri,
                 )
@@ -1085,7 +1083,7 @@ impl ServerHandler for SerialHandler {
                     count: summaries.len(),
                     connections: summaries,
                 })
-                .map_err(|e| McpError::internal_error(format!("serialize: {}", e), None))?;
+                .map_err(|e| McpError::internal_error(format!("serialize: {e}"), None))?;
                 Ok(ReadResourceResult::new(vec![ResourceContents::text(
                     body, uri,
                 )
@@ -1102,7 +1100,7 @@ impl ServerHandler for SerialHandler {
                     connection_id: conn.id().to_string(),
                     port: conn.port().to_string(),
                 })
-                .map_err(|e| McpError::internal_error(format!("serialize: {}", e), None))?;
+                .map_err(|e| McpError::internal_error(format!("serialize: {e}"), None))?;
                 Ok(ReadResourceResult::new(vec![ResourceContents::text(
                     body, uri,
                 )

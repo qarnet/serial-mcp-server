@@ -100,7 +100,7 @@ fn decode_base64(input: &str) -> Result<Vec<u8>, CodecError> {
 fn encode_hex_spaced(bytes: &[u8]) -> String {
     bytes
         .iter()
-        .map(|b| format!("{:02x}", b))
+        .map(|b| format!("{b:02x}"))
         .collect::<Vec<_>>()
         .join(" ")
 }
