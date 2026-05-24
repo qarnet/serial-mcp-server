@@ -29,6 +29,7 @@ uuid = { version = "1.11", features = ["v4"] }
 hex = "0.4"
 base64 = "0.22"
 axum = "0.8"
+glob = "0.3"
 
 [[bin]]
 name = "serial-mcp-server"
@@ -43,7 +44,7 @@ name = "serial_mcp_server"
 path = "src/lib.rs"
 
 [dev-dependencies]
-rmcp = { version = "1.7", features = ["client", "transport-streamable-http-client", "transport-streamable-http-client-reqwest"] }
+rmcp = { version = "1.7", features = ["client", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "transport-child-process"] }
 tokio = { version = "1.41", features = ["process", "fs"] }
 anyhow = "1.0"
 

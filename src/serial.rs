@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -266,14 +266,38 @@ impl SerialConnection {
 
     /// Read up to `dst.len()` bytes. Returns [`SerialError::ReadTimeout`] if
     /// `timeout_ms` is set and elapses before any byte arrives.
+    ///
+    /// When a timeout is given, the lock on the underlying IO is held for at
+    /// most `POLL_MS` milliseconds at a time and released between polls.  This
+    /// lets concurrent `write` calls on the same connection proceed without
+    /// waiting for the full read timeout — which is essential for the
+    /// request/response pattern (`wait_for` + `write`) on CDC-ACM devices.
     pub async fn read(&self, dst: &mut [u8], timeout_ms: Option<u64>) -> Result<usize> {
-        let mut io = self.io.lock().await;
+        const POLL_MS: u64 = 50;
         match timeout_ms {
-            Some(ms) => match timeout(Duration::from_millis(ms), io.read(dst)).await {
-                Ok(io_result) => Ok(io_result?),
-                Err(_elapsed) => Err(SerialError::ReadTimeout),
-            },
-            None => Ok(io.read(dst).await?),
+            None => Ok(self.io.lock().await.read(dst).await?),
+            Some(ms) => {
+                let deadline = Instant::now() + Duration::from_millis(ms);
+                loop {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        return Err(SerialError::ReadTimeout);
+                    }
+                    let poll_dur = remaining.min(Duration::from_millis(POLL_MS));
+                    {
+                        let mut io = self.io.lock().await;
+                        match timeout(poll_dur, io.read(dst)).await {
+                            Ok(Ok(n)) if n > 0 => return Ok(n),
+                            Ok(Ok(_)) => {}
+                            Ok(Err(e)) => return Err(SerialError::from(e)),
+                            Err(_elapsed) => {}
+                        }
+                    }
+                    // Yield to allow the I/O driver time to process epoll events
+                    // before re-acquiring the mutex for the next poll.
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            }
         }
     }
 

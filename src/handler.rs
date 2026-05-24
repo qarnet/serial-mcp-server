@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use glob::Pattern;
 use rmcp::{
     handler::server::{
         router::{prompt::PromptRouter, tool::ToolRouter},
@@ -272,6 +273,8 @@ pub struct SerialHandler {
     tool_router: ToolRouter<SerialHandler>,
     #[allow(dead_code)]
     prompt_router: PromptRouter<SerialHandler>,
+    /// Port allowlist patterns. If empty, all ports are allowed.
+    allowlist: Vec<Pattern>,
 }
 
 /// RAII wrapper around a streaming task. Aborts the task on drop.
@@ -297,12 +300,14 @@ impl SerialHandler {
     /// with a fake (in-memory) connection before exposing the handler over
     /// MCP, instead of going through the OS-level `open` path.
     pub fn with_manager(connections: Arc<ConnectionManager>) -> Self {
+        let allowlist = Self::parse_allowlist_env();
         Self {
             connections,
             streams: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             processor: Arc::new(tokio::sync::Mutex::new(OperationProcessor::new())),
             tool_router: Self::tool_router(),
             prompt_router: Self::prompt_router(),
+            allowlist,
         }
     }
 
@@ -322,11 +327,21 @@ impl SerialHandler {
     async fn open(
         &self,
         Parameters(args): Parameters<OpenArgs>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<Json<OpenResult>, String> {
         let config = parse_open_args(args)?;
         let port = config.port.clone();
         let baud_rate = config.baud_rate;
         debug!("Opening {} @ {}", port, baud_rate);
+
+        // Check allowlist
+        if !self.is_port_allowed(&port) {
+            return Err(format!(
+                "Port '{}' is not in the allowlist. Allowed patterns: {}",
+                port,
+                self.allowlist_summary()
+            ));
+        }
 
         let connection_id = self
             .connections
@@ -334,6 +349,12 @@ impl SerialHandler {
             .await
             .map_err(|e| log_tool_err("open", &format!("Failed to open port {port}"), e))?;
         info!("Opened connection {} -> {}", connection_id, port);
+
+        // Notify clients that the resource list has changed
+        if let Err(e) = ctx.peer.notify_resource_list_changed().await {
+            debug!("Failed to notify resource list changed: {}", e);
+        }
+
         Ok(Json(OpenResult {
             connection_id,
             port,
@@ -345,6 +366,7 @@ impl SerialHandler {
     async fn close(
         &self,
         Parameters(args): Parameters<CloseArgs>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<Json<CloseResult>, String> {
         debug!("Closing {}", args.connection_id);
         self.connections
@@ -358,6 +380,12 @@ impl SerialHandler {
                 )
             })?;
         info!("Closed connection {}", args.connection_id);
+
+        // Notify clients that the resource list has changed
+        if let Err(e) = ctx.peer.notify_resource_list_changed().await {
+            debug!("Failed to notify resource list changed: {}", e);
+        }
+
         Ok(Json(CloseResult {
             connection_id: args.connection_id,
         }))
@@ -612,21 +640,49 @@ async fn read_bytes(
     max_bytes: usize,
     timeout_ms: Option<u64>,
 ) -> Result<ReadOutcome, String> {
+    // How long to keep draining after the first bytes arrive.  USB CDC-ACM
+    // devices deliver data in USB packets, so a single write may be split
+    // across several packets.  This settle window collects them all without
+    // waiting for the full user-supplied timeout.
+    const SETTLE_MS: u64 = 50;
+
+    let effective_timeout = timeout_ms.unwrap_or(DEFAULT_READ_TIMEOUT_MS);
+    let deadline = Instant::now() + Duration::from_millis(effective_timeout);
     let mut buf = vec![0u8; max_bytes];
-    match connection.read(&mut buf, timeout_ms).await {
-        Ok(n) => {
-            buf.truncate(n);
-            Ok(ReadOutcome {
-                bytes: buf,
-                timed_out: n == 0,
+
+    // Wait for the first bytes to arrive.
+    let first_n = match connection.read(&mut buf, Some(effective_timeout)).await {
+        Ok(n) => n,
+        Err(SerialError::ReadTimeout) => {
+            return Ok(ReadOutcome {
+                bytes: Vec::new(),
+                timed_out: true,
             })
         }
-        Err(SerialError::ReadTimeout) => Ok(ReadOutcome {
-            bytes: Vec::new(),
-            timed_out: true,
-        }),
-        Err(e) => Err(log_tool_err("read", "Data reading failed", e)),
+        Err(e) => return Err(log_tool_err("read", "Data reading failed", e)),
+    };
+
+    // Drain any additional bytes that arrive within the settle window.
+    let mut total = first_n;
+    while total < max_bytes {
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as u64;
+        let settle = remaining.min(SETTLE_MS);
+        if settle == 0 {
+            break;
+        }
+        match connection.read(&mut buf[total..], Some(settle)).await {
+            Ok(n) if n > 0 => total += n,
+            _ => break,
+        }
     }
+
+    buf.truncate(total);
+    Ok(ReadOutcome {
+        bytes: buf,
+        timed_out: false,
+    })
 }
 
 /// Background RX-streaming loop. Polls the connection in small chunks and
@@ -878,6 +934,59 @@ pub struct InteractiveTerminalArgs {
     pub device_prompt: Option<String>,
 }
 
+// ---- Allowlist helpers ------------------------------------------------------
+
+impl SerialHandler {
+    /// Parse `SERIAL_MCP_ALLOWLIST` environment variable into glob patterns.
+    /// Returns empty Vec if not set (allowing all ports).
+    fn parse_allowlist_env() -> Vec<Pattern> {
+        let env_val = std::env::var("SERIAL_MCP_ALLOWLIST").unwrap_or_default();
+        if env_val.is_empty() {
+            return Vec::new();
+        }
+
+        let patterns: Vec<Pattern> = env_val
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .filter_map(|s| Pattern::new(s).ok())
+            .collect();
+
+        if !patterns.is_empty() {
+            info!(
+                "Port allowlist active: {}",
+                patterns
+                    .iter()
+                    .map(|p| p.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        patterns
+    }
+
+    /// Check if a port matches the allowlist. Empty allowlist = allow all.
+    fn is_port_allowed(&self, port: &str) -> bool {
+        if self.allowlist.is_empty() {
+            return true;
+        }
+        self.allowlist.iter().any(|pattern| pattern.matches(port))
+    }
+
+    /// Human-readable summary of allowlist patterns for error messages.
+    fn allowlist_summary(&self) -> String {
+        if self.allowlist.is_empty() {
+            "(all ports allowed)".to_string()
+        } else {
+            self.allowlist
+                .iter()
+                .map(|p| p.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    }
+}
+
 #[prompt_router]
 impl SerialHandler {
     /// Walk through diagnosing an unknown serial port: try common baud
@@ -983,6 +1092,7 @@ impl ServerHandler for SerialHandler {
             ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
+                .enable_resources_list_changed()
                 .enable_prompts()
                 .enable_logging()
                 .build(),
@@ -991,7 +1101,7 @@ impl ServerHandler for SerialHandler {
             env!("CARGO_PKG_NAME"),
             env!("CARGO_PKG_VERSION"),
         ))
-        .with_protocol_version(ProtocolVersion::V_2024_11_05)
+        .with_protocol_version(ProtocolVersion::V_2025_11_25)
         .with_instructions(
             "A serial port communication MCP server. Use list_ports to discover available serial ports, then open connections to communicate with serial devices. Resources: serial://ports, serial://connections, serial://connections/{id}. Prompts: diagnose_port, interactive_terminal. Subscribe to live RX bytes with the subscribe tool; the server emits notifications/message events with logger=\"serial:<connection_id>\"."
                 .to_string(),
