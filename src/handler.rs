@@ -360,7 +360,7 @@ impl SerialHandler {
         }
 
         // Notify subscribers to the specific connection resource
-        let conn_uri = format!("{}{}", URI_CONNECTION_PREFIX, connection_id);
+        let conn_uri = format!("{URI_CONNECTION_PREFIX}{connection_id}");
         let subs = self.subscribers.lock().await;
         if subs.contains_key(&conn_uri) {
             drop(subs);
@@ -409,7 +409,7 @@ impl SerialHandler {
         }
 
         // Notify subscribers to the specific connection resource
-        let conn_uri = format!("{}{}", URI_CONNECTION_PREFIX, args.connection_id);
+        let conn_uri = format!("{URI_CONNECTION_PREFIX}{}", args.connection_id);
         let subs = self.subscribers.lock().await;
         if subs.contains_key(&conn_uri) {
             drop(subs);
@@ -1025,6 +1025,32 @@ impl SerialHandler {
                 .join(", ")
         }
     }
+
+    /// Generate completion suggestions for tool/resource arguments.
+    async fn get_completions(&self, r#ref: &Reference, argument: &ArgumentInfo) -> Vec<String> {
+        match r#ref {
+            Reference::Resource(resource_ref) => {
+                if resource_ref.uri == URI_PORTS && argument.name == "port" {
+                    match PortInfo::list_available() {
+                        Ok(ports) => ports.into_iter().map(|p| p.name).collect(),
+                        Err(_) => vec![],
+                    }
+                } else {
+                    vec![]
+                }
+            }
+            Reference::Prompt(prompt_ref) => {
+                if prompt_ref.name == "diagnose_port" && argument.name == "port" {
+                    match PortInfo::list_available() {
+                        Ok(ports) => ports.into_iter().map(|p| p.name).collect(),
+                        Err(_) => vec![],
+                    }
+                } else {
+                    vec![]
+                }
+            }
+        }
+    }
 }
 
 #[prompt_router]
@@ -1137,6 +1163,7 @@ impl ServerHandler for SerialHandler {
                 .enable_resources_subscribe()
                 .enable_prompts()
                 .enable_logging()
+                .enable_completions()
                 .build(),
         )
         .with_server_info(Implementation::new(
@@ -1287,6 +1314,19 @@ impl ServerHandler for SerialHandler {
                 Some(serde_json::json!({ "uri": uri })),
             )),
         }
+    }
+
+    async fn complete(
+        &self,
+        request: CompleteRequestParams,
+        _ctx: RequestContext<RoleServer>,
+    ) -> Result<CompleteResult, McpError> {
+        let suggestions = self
+            .get_completions(&request.r#ref, &request.argument)
+            .await;
+        let completion = CompletionInfo::with_all_values(suggestions)
+            .map_err(|e| McpError::internal_error(format!("Completion error: {e}"), None))?;
+        Ok(CompleteResult::new(completion))
     }
 
     async fn subscribe(
