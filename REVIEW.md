@@ -2,12 +2,12 @@
 
 ## Context
 
-Reading guide for the v0.2.0 fork, now that the sprint sequence
-(A–K plus integration tests) is done. This document is the reading
+Reading guide for the v0.2.1 release, now that the MCP 2025-11-25 compliance
+sprint is done. This document is the reading
 order plus per-file checkpoints — the things actually worth your
 attention vs. the things that are just plumbing.
 
-State of the repo, head of `main` = `9b4f4a9`:
+State of the repo, head of `main`:
 
 ```
 src/
@@ -18,7 +18,8 @@ src/
   codec.rs          184 LOC   Encoding enum + decode/encode + 9 tests
   serial.rs         600 LOC   PortInfo, SerialIo trait, ConnectionManager
                               + LoopbackIo test backend + 12 tests
-  handler.rs       1342 LOC   11 tools, 3 resources, 2 prompts,
+  handler.rs       ~1500 LOC  11 tools, 3 resources, 2 prompts,
+                              resource change notifications, port allowlist,
                               all response structs, parse helpers,
                               streaming + task framework wiring, 15 tests
 tests/
@@ -27,9 +28,11 @@ tests/
   http_integration  331 LOC   Layer 2 — 14 in-memory HTTP tests
   serial_pty        217 LOC   Layer 3 — 6 real-PTY tests (Linux only)
   hardware_loopback 186 LOC   Layer 4 — 2 ignored hardware tests
+  stdio_integration ~170 LOC Layer 5 — 3 stdio transport tests
+  allowlist         ~220 LOC Layer 6 — 3 port allowlist tests
 ```
 
-Total ~3.2 KLOC production+tests. Active: 56 tests pass, clippy
+Total ~3.5 KLOC production+tests. Active: 62 tests pass (plus 3 ignored hardware tests), clippy
 `-D warnings` clean, `cargo fmt --check` clean.
 
 ## Reading order (start → finish, ~60–90 min)
@@ -61,9 +64,7 @@ Six lines. Confirms the public surface: `Result`, `SerialError`,
 28 lines. Single tokio::main, logging setup, `SerialHandler::new()`
 on stdio.
 
-**Watch for:** no CLI flags. The only knob is `RUST_LOG`. Question:
-do you want a `--port-allowlist` or similar at some point, or is that
-a security policy that belongs upstream of the binary?
+**Watch for:** no CLI flags. The only knobs are `RUST_LOG` and `SERIAL_MCP_ALLOWLIST`. The allowlist is set via environment variable (e.g., `SERIAL_MCP_ALLOWLIST="/dev/ttyACM*,/dev/ttyUSB*"`) — no config file needed.
 
 ### 4. `src/bin/http.rs` — HTTP entry
 
@@ -215,10 +216,9 @@ order of appearance:
   hand-written prose. They contain newlines + tool-call syntax. They
   go into every LLM that triggers `prompts/get`, so wording matters.
   Read them as if you were the LLM.
-- `list_resources` returns the two static resources but does NOT
-  declare `resources/list_changed` capability. So clients won't be
-  notified when connections are opened/closed. Is that fine, or do
-  you want to wire it up?
+- `list_resources` now declares `resources/list_changed` capability
+  and fires notifications on open/close. The allowlist check happens
+  in the `open` tool before the connection is created.
 
 ### 9. `tests/common/mod.rs` — test harness
 
@@ -253,11 +253,25 @@ opens slave_path → client connects via HTTP → returns
 connection_id + master fd. Each test then drives one direction of
 the traffic.
 
-### 12. `tests/hardware_loopback.rs` — Layer 4
+### 12. `tests/stdio_integration.rs` — Layer 4 (stdio transport)
 
-186 lines, 2 ignored tests. Glance only; they're for manual
-verification with a USB-Serial dongle + TX-RX jumper. Worth knowing
-they exist if you ever want to validate a hardware setup.
+~170 lines, 4 tests (1 ignored). Spawns the stdio binary as a child
+process and connects via stdin/stdout pipes using rmcp's
+`TokioChildProcess` transport. Verifies the stdio transport works
+identically to HTTP — critical for desktop MCP clients (Claude Desktop,
+opencode).
+
+### 13. `tests/allowlist.rs` — Layer 5 (security)
+
+~220 lines, 3 tests. Tests the `SERIAL_MCP_ALLOWLIST` env var:
+blocks unauthorized ports, allows authorized ports, and supports
+glob patterns (`/dev/ttyACM*`).
+
+### 14. `tests/hardware_loopback.rs` — Layer 6
+
+186 lines, 2 ignored tests. Real USB-Serial adapter with TX→RX jumper.
+Confirms behaviour on physical hardware. Run with:
+`SERIAL_MCP_TEST_PORT=/dev/ttyACM0 cargo test --test hardware_loopback -- --ignored --test-threads=1`
 
 ### 13. `CHANGELOG.md`
 
@@ -313,7 +327,7 @@ After reading, exercise the code yourself:
 ```bash
 # Unit + integration tests (fast)
 cargo test
-# → 36 unit + 14 HTTP + 6 PTY + 2 ignored = 56 active
+# → 36 unit + 14 HTTP + 6 PTY + 3 stdio + 3 allowlist + 3 ignored hardware = 62 active
 
 # Strictest CI gate
 cargo clippy --all-targets -- -D warnings
@@ -329,7 +343,7 @@ npx @modelcontextprotocol/inspector
 # → walk through list_tools, list_resources, get_prompt(diagnose_port)
 
 # If you have a USB-Serial dongle with TX-RX jumpered:
-SERIAL_MCP_TEST_PORT=/dev/ttyUSB0 cargo test --test hardware_loopback -- --ignored
+SERIAL_MCP_TEST_PORT=/dev/ttyACM0 cargo test --test hardware_loopback -- --ignored --test-threads=1
 ```
 
 ## Questions to come back with
@@ -337,15 +351,13 @@ SERIAL_MCP_TEST_PORT=/dev/ttyUSB0 cargo test --test hardware_loopback -- --ignor
 Likely candidates after you finish reading:
 
 - Should the HTTP binary share a single `ConnectionManager` across
-  sessions, or stay session-isolated?
-- Streaming via `notifications/message` vs `resources/updated` — pick
-  one or expose both?
-- Resource subscription (`resources/list_changed` +
-  `resources/updated`) — wire it up now or defer?
+  sessions, or stay session-isolated? (Current decision: isolated for safety)
 - Cap on simultaneous `subscribe` tasks per connection? (currently
   unbounded, though each connection is locked so only one runs at a
   time per port.)
 - Prompt template wording — pass to a real LLM for a sanity read?
+- Progress notifications for long-running tools — wire up now or defer?
+- Completions for tool arguments — auto-complete ports, baud rates?
 - Anything you want renamed, restructured, or commented further?
 
 ## Reviewer's punch list
@@ -359,6 +371,9 @@ Likely candidates after you finish reading:
 - [ ] `tests/common/mod.rs`
 - [ ] `tests/http_integration.rs`
 - [ ] `tests/serial_pty.rs`
+- [ ] `tests/stdio_integration.rs`
+- [ ] `tests/allowlist.rs`
+- [ ] `tests/hardware_loopback.rs`
 - [ ] `CHANGELOG.md`
 - [ ] `.github/workflows/ci.yml`
 - [ ] Run `cargo test` + clippy + fmt-check

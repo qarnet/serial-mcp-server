@@ -9,6 +9,9 @@ ports: open, read, write, wait for prompts, stream RX bytes, toggle
 DTR/RTS, send BREAK. Cross-platform (Windows / Linux / macOS). Two
 transports: stdio and streamable HTTP.
 
+> **MCP 2025-11-25 compliant** — Protocol version updated, resource change
+> notifications, port allowlist, and comprehensive hardware testing.
+>
 > **This is a fork** of the original [adancurusul/serial-mcp-server](https://github.com/adancurusul/serial-mcp-server).
 > The fork rebuilds the project against rmcp 1.7, removes ~80% of the
 > original code as dead scaffolding, and adds resources, prompts,
@@ -22,7 +25,10 @@ transports: stdio and streamable HTTP.
 - **2 prompt templates** for common agent workflows
 - **Live RX streaming** via MCP `notifications/message` events
 - **Task cancellation** on the long-running tools
+- **Resource change notifications** — clients get push updates when connections open/close
+- **Port allowlist** — restrict which serial ports can be opened via `SERIAL_MCP_ALLOWLIST`
 - **Two transports**: stdio for desktop clients, streamable HTTP for remote use
+- **Protocol version**: MCP 2025-11-25
 
 ## Install
 
@@ -48,6 +54,26 @@ The build produces two binaries under `target/release/`:
 
 `RUST_LOG=debug` enables verbose logs (written to stderr). The HTTP
 binary reads `SERIAL_MCP_HTTP_BIND` to override the bind address.
+
+## Security: Port Allowlist
+
+Control which serial ports the server can open via environment variable:
+
+```bash
+# Exact match
+SERIAL_MCP_ALLOWLIST="/dev/ttyACM0" ./serial-mcp-server
+
+# Glob patterns (comma-separated)
+SERIAL_MCP_ALLOWLIST="/dev/ttyACM*,/dev/ttyUSB*" ./serial-mcp-server
+
+# Windows
+SERIAL_MCP_ALLOWLIST="COM3,COM4" ./serial-mcp-server
+```
+
+**Behavior:**
+- If not set: all ports are allowed (backward compatible)
+- `list_ports` still lists ALL ports so agents can discover what's available
+- `open` rejects ports not matching the allowlist with a clear error
 
 ## Configure an MCP client
 
@@ -83,8 +109,8 @@ Then point any streamable-HTTP-capable MCP client at
 | Tool | Purpose |
 |---|---|
 | `list_ports` | Enumerate serial ports the OS exposes (name, description, hardware id). |
-| `open` | Open a port with full framing config (`baud_rate`, `data_bits`, `stop_bits`, `parity`, `flow_control`). Returns a `connection_id`. |
-| `close` | Release a connection by id. |
+| `open` | Open a port with full framing config (`baud_rate`, `data_bits`, `stop_bits`, `parity`, `flow_control`). Returns a `connection_id`. Respects `SERIAL_MCP_ALLOWLIST`. |
+| `close` | Release a connection by id. Fires resource list changed notification. |
 | `write` | Send bytes. Payload is encoded utf8 / hex / base64. |
 | `read` | Read up to `max_bytes` with optional `timeout_ms`. **Task-capable.** |
 | `flush` | Discard buffered bytes (`input`, `output`, or `both`). |
@@ -96,7 +122,7 @@ Then point any streamable-HTTP-capable MCP client at
 
 All tool responses are **structured JSON** (rmcp `Json<T>`) — clients
 get typed fields, not strings to regex over. Operational failures
-(invalid args, unknown id, IO error) come back as
+(invalid args, unknown id, IO error, allowlist block) come back as
 `CallToolResult { isError: true, ... }` so the LLM can recover;
 protocol-level errors stay as `McpError`.
 
@@ -120,10 +146,12 @@ return synchronously.
 | URI | Description |
 |---|---|
 | `serial://ports` | Live `ListPortsResult` JSON, re-enumerates on every read. |
-| `serial://connections` | List of currently-open connections (id + port). |
+| `serial://connections` | List of currently-open connections (id + port). Updated in real-time with push notifications. |
 | `serial://connections/{id}` | Templated resource — substitute `{id}` with a `connection_id` returned by `open`. |
 
-Resources are pull-only at the moment (no `resources/subscribe`).
+**Resource change notifications:** The server declares `resources/list_changed`
+capability. When a connection opens or closes, all connected clients receive
+`notifications/resources/list_changed` — no polling required.
 
 ## Prompts
 
@@ -172,11 +200,11 @@ A typical "drive an embedded board" interaction:
 ```
 1. list_ports               → ["/dev/ttyUSB0", "/dev/ttyACM0"]
 2. open(port="/dev/ttyACM0", baud_rate=115200)
-                            → { connection_id: "9f..." }
+                             → { connection_id: "9f..." }
 3. set_dtr_rts(id, dtr=false, rts=false)
    set_dtr_rts(id, dtr=true,  rts=true)    # Arduino soft-reset
 4. wait_for(id, pattern="OK>", timeout_ms=3000)
-                            → { matched: true, data: "...OK>", match_index: 27 }
+                             → { matched: true, data: "...OK>", match_index: 27 }
 5. write(id, data="status\r\n")
    wait_for(id, pattern="OK>", timeout_ms=1000)
 6. close(id)
@@ -233,10 +261,16 @@ The test suite is layered:
 | 1 — unit | `src/*.rs` | 36 | Codec, baud-rate validation, manager invariants, `wait_for` accumulator over an in-memory `DuplexStream`, URI parsing, prompt-router wiring. | every push, all platforms |
 | 2 — HTTP integration (in-memory) | `tests/http_integration.rs` | 14 | Real `rmcp` HTTP client → `axum`-hosted `SerialHandler` → injected loopback connection. Covers the full MCP surface (tools / resources / prompts / notifications) over the wire. | every push, all platforms |
 | 3 — HTTP integration (real PTY) | `tests/serial_pty.rs` | 6 | Same harness as Layer 2 but the server opens a real Linux PTY slave (`/dev/pts/N`) via `tokio_serial::SerialStream`. Exercises the production serial code path end-to-end. | every push, Linux only (`#[cfg(target_os = "linux")]`) |
-| 4 — hardware-in-the-loop | `tests/hardware_loopback.rs` | 2 (ignored) | Real USB-Serial adapter with TX→RX jumper. Confirms behaviour on physical hardware. | manual: `SERIAL_MCP_TEST_PORT=/dev/ttyUSB0 cargo test -- --ignored` |
+| 4 — STDIO transport | `tests/stdio_integration.rs` | 3 | Spawns the stdio binary as a child process and connects via stdin/stdout pipes. Verifies stdio transport works with real MCP clients. | every push, all platforms |
+| 5 — Port allowlist | `tests/allowlist.rs` | 3 | Tests allowlist blocking, allowing, and glob pattern matching via stdio transport. | every push, all platforms |
+| 6 — hardware-in-the-loop | `tests/hardware_loopback.rs` | 2 (ignored) | Real USB-Serial adapter with TX→RX jumper. Confirms behaviour on physical hardware. | manual: `SERIAL_MCP_TEST_PORT=/dev/ttyACM0 cargo test --test hardware_loopback -- --ignored --test-threads=1` |
 
-Layer 4 needs a USB-Serial dongle plugged in with its TX and RX pins
-jumpered together (a single wire across the two pins). Without that,
+**Hardware test requirements:**
+- A USB-Serial device with TX and RX pins jumpered together (or a device that echoes)
+- `SERIAL_MCP_TEST_PORT` env var set to the device path
+- On Linux: `sudo systemctl stop ModemManager` if using `/dev/ttyACM0`
+
+Layer 6 needs a USB-Serial dongle plugged in. Without that,
 `hw_loopback_write_then_read_roundtrip` will read no data and fail.
 
 ## STM32 demo
@@ -253,21 +287,22 @@ unchanged with it. See
 ┌──────────────────┐     stdio / streamable-HTTP    ┌──────────────────┐
 │   MCP client     │ ─────────────────────────────▶ │  SerialHandler   │
 │   (Claude, …)    │ ◀───── notifications/message ─ │  (rmcp 1.7)      │
+│                  │ ◀───── resource list changed ─ │  Protocol 2025-11│
 └──────────────────┘                                 └────────┬─────────┘
                                                               │
                                                      ConnectionManager
                                                               │
-                                              ┌───────────────┼───────────────┐
-                                              ▼               ▼               ▼
-                                       SerialConnection  SerialConnection  ...
-                                       (Box<dyn SerialIo>)
-                                              │
-                                              ▼
-                                         tokio_serial::SerialStream
-                                         (real OS port)
-                                         — or —
-                                         test_support::LoopbackIo
-                                         (in-memory DuplexStream)
+                                               ┌───────────────┼───────────────┐
+                                               ▼               ▼               ▼
+                                        SerialConnection  SerialConnection  ...
+                                        (Box<dyn SerialIo>)
+                                               │
+                                               ▼
+                                          tokio_serial::SerialStream
+                                          (real OS port)
+                                          — or —
+                                          test_support::LoopbackIo
+                                          (in-memory DuplexStream)
 ```
 
 ## Acknowledgments

@@ -70,6 +70,41 @@ prompts, streaming, task cancellation, and an HTTP transport.
 | After naming/structure refactor (`d55711e..cda7788`) | 20 |
 | After feature sprint A–F | 33 |
 | After feature sprint G–K | 36 |
+| After MCP 2025-11-25 compliance sprint | 62 active + 3 ignored |
+
+## [0.2.1] — 2026-05-24
+
+MCP 2025-11-25 compliance, CDC-ACM hardware fixes, port allowlist, and comprehensive testing.
+
+### Added
+
+- **MCP Protocol 2025-11-25** — Updated from 2024-11-05 to 2025-11-25.
+- **Resource change notifications** — `open` and `close` tools now fire `notify_resource_list_changed()` so clients get push updates when connections change.
+- **`resources/list_changed` capability** — Declared in `get_info()` so clients know to expect resource list updates.
+- **Port allowlist** — New `SERIAL_MCP_ALLOWLIST` environment variable with glob pattern support (e.g., `/dev/ttyACM*,/dev/ttyUSB*`).
+  - `list_ports` still shows all ports for discovery
+  - `open` rejects unauthorized ports with clear error message
+  - If not set, all ports allowed (backward compatible)
+- **STDIO transport integration tests** — `tests/stdio_integration.rs` with 4 tests:
+  - Initialize handshake over stdio pipes
+  - List tools via stdio
+  - List resources via stdio
+  - Full hardware lifecycle test (marked `#[ignore]`, requires device)
+- **Allowlist tests** — `tests/allowlist.rs` with 3 tests:
+  - Blocks unauthorized ports
+  - Allows authorized ports
+  - Glob pattern matching works
+- **CDC-ACM hardware test support** — Verified on `/dev/ttyACM0` with TX-RX loopback.
+
+### Changed
+
+- **CDC-ACM packet coalescing fix** — Changed `POLL_MS` from 5ms to 50ms in `SerialConnection::read()` to allow USB packet coalescing before returning data. Prevents read truncation on CDC-ACM devices.
+- **RX streaming strategy** — Confirmed RX data streaming stays on `notifications/message` (logging channel) rather than `resources/updated`. This provides immediate delivery without round-trips.
+
+### Fixed
+
+- **`pty_wait_for_matches_real_serial_pattern`** test — Now passes consistently after increasing poll interval to 50ms.
+- **Hardware loopback tests** — Both tests (`hw_loopback_write_then_read_roundtrip` and `hw_loopback_wait_for_matches_echo`) now pass on `/dev/ttyACM0`.
 
 ## [0.1.0] — initial open source release (upstream)
 
