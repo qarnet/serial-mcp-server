@@ -1,1 +1,6 @@
-/target
+/result
+/.direnv/
+/target/
+.vscode/**
+!.vscode/extensions.json
+!.vscode/settings.json
