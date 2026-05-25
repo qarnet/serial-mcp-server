@@ -22,8 +22,7 @@ use rmcp::{
     task_manager::OperationProcessor,
     tool, tool_handler, tool_router, ErrorData as McpError, Json, RoleServer, ServerHandler,
 };
-use schemars::JsonSchema;
-use serde::Serialize;
+
 use tracing::{debug, error, info};
 
 use crate::codec::{self, Encoding};
@@ -1052,38 +1051,10 @@ impl ServerHandler for SerialHandler {
 
 // ---- Resource URI handling --------------------------------------------------
 
-const URI_PORTS: &str = "serial://ports";
-const URI_CONNECTIONS: &str = "serial://connections";
-const URI_CONNECTION_PREFIX: &str = "serial://connections/";
-const URI_CONNECTION_TEMPLATE: &str = "serial://connections/{id}";
-const URI_CONNECTION_RAW_TEMPLATE: &str = "serial://connections/{id}/raw";
-
-#[derive(Debug, PartialEq, Eq)]
-enum ResourceUriKind {
-    Ports,
-    ConnectionsList,
-    ConnectionDetail(String),
-    Unknown,
-}
-
-fn parse_resource_uri(uri: &str) -> ResourceUriKind {
-    match uri {
-        URI_PORTS => ResourceUriKind::Ports,
-        URI_CONNECTIONS => ResourceUriKind::ConnectionsList,
-        other => match other.strip_prefix(URI_CONNECTION_PREFIX) {
-            Some(id) if !id.is_empty() && !id.contains('/') => {
-                ResourceUriKind::ConnectionDetail(id.to_string())
-            }
-            _ => ResourceUriKind::Unknown,
-        },
-    }
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-struct ConnectionsResource {
-    count: usize,
-    connections: Vec<ConnectionSummary>,
-}
+use crate::resources::{
+    parse_resource_uri, ConnectionsResource, ResourceUriKind, URI_CONNECTIONS,
+    URI_CONNECTION_PREFIX, URI_CONNECTION_RAW_TEMPLATE, URI_CONNECTION_TEMPLATE, URI_PORTS,
+};
 
 #[cfg(test)]
 mod tests {
