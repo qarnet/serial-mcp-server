@@ -24,13 +24,12 @@ use rmcp::{
 use tracing::{debug, info};
 
 use crate::security::SecurityManager;
-use crate::serial::{ConnectionManager, ConnectionSummary, PortInfo, SerialConnection};
+use crate::serial::{ConnectionManager, ConnectionSummary, PortInfo};
 
 use crate::prompts::types::*;
 use crate::prompts::{diagnose, interactive};
-use crate::tools::helpers::*;
 use crate::tools::types::*;
-use crate::tools::{control_ops, io_ops, pattern_ops, port_ops};
+use crate::tools::{control_ops, io_ops, pattern_ops, port_ops, stream_ops};
 
 // ---- Handler ---------------------------------------------------------------
 
@@ -39,7 +38,7 @@ pub struct SerialHandler {
     pub(crate) connections: Arc<ConnectionManager>,
     /// Per-connection background RX-streaming tasks, indexed by connection id.
     /// Dropping a handle aborts the task.
-    streams: Arc<tokio::sync::Mutex<HashMap<String, StreamHandle>>>,
+    streams: Arc<tokio::sync::Mutex<HashMap<String, stream_ops::StreamHandle>>>,
     /// MCP task manager for opt-in long-running tool invocations
     /// (read, wait_for, send_break). Clients can submit those tools as
     /// tasks and cancel them via the standard MCP tasks/cancel request.
@@ -52,17 +51,6 @@ pub struct SerialHandler {
     security: SecurityManager,
     /// Active resource subscribers by URI (simple reference count).
     subscribers: Arc<tokio::sync::Mutex<HashMap<String, usize>>>,
-}
-
-/// RAII wrapper around a streaming task. Aborts the task on drop.
-struct StreamHandle {
-    join: tokio::task::JoinHandle<()>,
-}
-
-impl Drop for StreamHandle {
-    fn drop(&mut self) {
-        self.join.abort();
-    }
 }
 
 #[tool_router]
@@ -177,32 +165,7 @@ impl SerialHandler {
         Parameters(args): Parameters<SubscribeArgs>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<Json<SubscribeResult>, String> {
-        debug!(
-            "subscribe {} encoding={} chunk={} poll={}",
-            args.connection_id, args.encoding, args.max_chunk_bytes, args.poll_interval_ms
-        );
-        let encoding = parse_encoding(&args.encoding)?;
-        let connection = self.lookup_connection(&args.connection_id).await?;
-        let peer = ctx.peer.clone();
-
-        let id = args.connection_id.clone();
-        let chunk_bytes = args.max_chunk_bytes;
-        let poll_ms = args.poll_interval_ms;
-        let join = tokio::spawn(stream_rx(peer, connection, encoding, chunk_bytes, poll_ms));
-
-        let mut streams = self.streams.lock().await;
-        let replaced_previous = streams.insert(id.clone(), StreamHandle { join }).is_some();
-        info!(
-            "subscribed RX stream for {} (replaced={})",
-            id, replaced_previous
-        );
-        Ok(Json(SubscribeResult {
-            connection_id: id,
-            encoding: encoding.to_string(),
-            max_chunk_bytes: chunk_bytes,
-            poll_interval_ms: poll_ms,
-            replaced_previous,
-        }))
+        stream_ops::subscribe(&self.connections, &self.streams, args, ctx).await
     }
 
     #[tool(
@@ -212,17 +175,7 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<UnsubscribeArgs>,
     ) -> Result<Json<UnsubscribeResult>, String> {
-        debug!("unsubscribe {}", args.connection_id);
-        let mut streams = self.streams.lock().await;
-        let was_active = streams.remove(&args.connection_id).is_some();
-        info!(
-            "unsubscribed {} (was_active={})",
-            args.connection_id, was_active
-        );
-        Ok(Json(UnsubscribeResult {
-            connection_id: args.connection_id,
-            was_active,
-        }))
+        stream_ops::unsubscribe(&self.streams, args).await
     }
 
     #[tool(
@@ -234,17 +187,6 @@ impl SerialHandler {
         Parameters(args): Parameters<WaitForArgs>,
     ) -> Result<Json<WaitForResult>, String> {
         pattern_ops::wait_for(&self.connections, args).await
-    }
-}
-
-// Lookup is split out so the macro-generated tool methods stay focused.
-impl SerialHandler {
-    /// Resolve an MCP connection id into a live [`SerialConnection`].
-    async fn lookup_connection(&self, id: &str) -> Result<Arc<SerialConnection>, String> {
-        self.connections
-            .get(id)
-            .await
-            .map_err(|_| format!("Connection ID {id} not found"))
     }
 }
 
@@ -543,6 +485,7 @@ use crate::resources::{
 mod tests {
     use super::*;
     use crate::codec::Encoding;
+    use crate::tools::helpers::*;
 
     #[test]
     fn open_args_parsed_strictly() {
