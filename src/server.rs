@@ -77,12 +77,20 @@ impl SerialHandler {
         }
     }
 
-    #[tool(description = "List all available serial ports on the system")]
+    #[tool(
+        description = "List all available serial ports on the system",
+        title = "List Serial Ports",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
     async fn list_ports(&self) -> Result<Json<ListPortsResult>, String> {
         port_ops::list_ports().await
     }
 
-    #[tool(description = "Open a serial port connection with specified configuration")]
+    #[tool(
+        description = "Open a serial port connection with specified configuration",
+        title = "Open Serial Port",
+        annotations(destructive_hint = false, open_world_hint = false)
+    )]
     async fn open(
         &self,
         Parameters(args): Parameters<OpenArgs>,
@@ -98,7 +106,11 @@ impl SerialHandler {
         .await
     }
 
-    #[tool(description = "Close an open serial port connection")]
+    #[tool(
+        description = "Close an open serial port connection",
+        title = "Close Serial Port",
+        annotations(destructive_hint = false, open_world_hint = false)
+    )]
     async fn close(
         &self,
         Parameters(args): Parameters<CloseArgs>,
@@ -107,7 +119,11 @@ impl SerialHandler {
         port_ops::close(&self.connections, &self.subscribers, args, ctx).await
     }
 
-    #[tool(description = "Write data to a serial port connection")]
+    #[tool(
+        description = "Write data to a serial port connection",
+        title = "Write Serial Data",
+        annotations(destructive_hint = true, open_world_hint = false)
+    )]
     async fn write(
         &self,
         Parameters(args): Parameters<WriteArgs>,
@@ -117,6 +133,8 @@ impl SerialHandler {
 
     #[tool(
         description = "Read data from a serial port connection",
+        title = "Read Serial Data",
+        annotations(read_only_hint = true, open_world_hint = false),
         execution(task_support = "optional")
     )]
     async fn read(
@@ -127,7 +145,9 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Discard buffered serial data. target=input clears OS read buffer (data the device sent that the app hasn't consumed); target=output clears the OS write queue; target=both clears both."
+        description = "Discard buffered serial data. target=input clears OS read buffer (data the device sent that the app hasn't consumed); target=output clears the OS write queue; target=both clears both.",
+        title = "Flush Serial Buffers",
+        annotations(destructive_hint = true, open_world_hint = false)
     )]
     async fn flush(
         &self,
@@ -137,7 +157,13 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Set the DTR and RTS modem-control lines. Common patterns: pulse DTR low for Arduino auto-reset; hold both low to enter ESP32 bootloader."
+        description = "Set the DTR and RTS modem-control lines. Common patterns: pulse DTR low for Arduino auto-reset; hold both low to enter ESP32 bootloader.",
+        title = "Set DTR/RTS",
+        annotations(
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn set_dtr_rts(
         &self,
@@ -148,6 +174,8 @@ impl SerialHandler {
 
     #[tool(
         description = "Assert a BREAK condition on the TX line for duration_ms milliseconds (default 250ms), then release it. Used to signal attention on some legacy serial protocols.",
+        title = "Send BREAK",
+        annotations(destructive_hint = true, open_world_hint = false),
         execution(task_support = "optional")
     )]
     async fn send_break(
@@ -158,7 +186,13 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Subscribe to a connection: a background task reads bytes in chunks and forwards them to the client as MCP `notifications/message` events with logger=\"serial:<connection_id>\". Replaces any prior subscription on the same connection. Stop with unsubscribe or by closing the connection."
+        description = "Subscribe to a connection: a background task reads bytes in chunks and forwards them to the client as MCP `notifications/message` events with logger=\"serial:<connection_id>\". Replaces any prior subscription on the same connection. Stop with unsubscribe or by closing the connection.",
+        title = "Subscribe to RX Stream",
+        annotations(
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn subscribe(
         &self,
@@ -169,7 +203,13 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Cancel an active RX subscription on a connection. No-op if no subscription exists."
+        description = "Cancel an active RX subscription on a connection. No-op if no subscription exists.",
+        title = "Unsubscribe from RX Stream",
+        annotations(
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn unsubscribe(
         &self,
@@ -180,6 +220,8 @@ impl SerialHandler {
 
     #[tool(
         description = "Read bytes from a connection until a pattern matches or timeout. Pattern is interpreted with pattern_encoding (utf8/hex/base64). Returns the accumulated bytes (re-encoded with response_encoding) and the byte offset where the match started. Use for prompt/response interactions, e.g. send 'reset\\r\\n' then wait_for pattern='OK>'.",
+        title = "Wait for Serial Pattern",
+        annotations(read_only_hint = true, open_world_hint = false),
         execution(task_support = "optional")
     )]
     async fn wait_for(
