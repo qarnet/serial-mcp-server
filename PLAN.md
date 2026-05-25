@@ -52,7 +52,7 @@ SERIAL_MCP_TEST_PORT=/dev/ttyACM0 cargo test --test hardware_loopback -- --ignor
 #### 1.2 Update Protocol Version to 2025-11-25
 **Status:** COMPLETE
 
-**Change:** `src/handler.rs:1022` - Updated from `ProtocolVersion::V_2024_11_05` to `ProtocolVersion::V_2025_11_25`
+**Change:** `src/server.rs` - Updated from `ProtocolVersion::V_2024_11_05` to `ProtocolVersion::V_2025_11_25`
 
 #### 1.3 Add Resource Change Notifications
 **Status:** COMPLETE
@@ -179,7 +179,7 @@ SERIAL_MCP_ALLOWLIST="/dev/ttyACM0,/dev/ttyUSB*,COM3"
 
 ### Source code
 - `src/serial.rs` - Changed `POLL_MS` from 5ms to 50ms (CDC-ACM fix)
-- `src/handler.rs` - Protocol version, resource notifications, allowlist
+- `src/server.rs` - Protocol version, resource notifications, allowlist
 - `Cargo.toml` - Added `glob` dependency, `transport-child-process` feature
 
 ### New files

@@ -97,7 +97,7 @@ fn log_tool_err<E: std::fmt::Display>(op: &str, context: &str, err: E) -> String
 
 ## Architecture
 
-- **Handler** (`src/handler.rs`): MCP surface — tools, resources, prompts
+- **Server** (`src/server.rs`): MCP surface — tools, resources, prompts
 - **Serial** (`src/serial.rs`): Data plane — `SerialConnection`, `ConnectionManager`, `SerialIo` trait
 - **Codec** (`src/codec.rs`): `Encoding` enum (utf8/hex/base64) with encode/decode
 - **Error** (`src/error.rs`): Single `SerialError` enum

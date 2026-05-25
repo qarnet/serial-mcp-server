@@ -4,7 +4,7 @@
 
 ```
 src/
-├── handler.rs          1,581 lines (GOD FILE)
+├── handler.rs          1,581 lines (GOD FILE, since renamed to server.rs)
 ├── serial.rs            637 lines (config + IO + manager mixed)
 ├── codec.rs             184 lines (focused, keep as-is)
 ├── error.rs              27 lines (focused, keep as-is)
@@ -13,7 +13,7 @@ src/
 ```
 
 **Problems:**
-- handler.rs does everything: tools, prompts, resources, security, completions
+- handler.rs did everything: tools, prompts, resources, security, completions
 - serial.rs mixes config enums with runtime IO + manager
 - Tool types (args/responses) scattered in one file
 - No clear module boundaries
@@ -63,8 +63,8 @@ src/
 ### Phase 1: Extract Tool Types (Low Risk)
 1. Create `src/tools/types.rs` with all tool args + response structs
 2. Add `pub mod tools` to `src/lib.rs`
-3. Import types in `handler.rs` via `use crate::tools::types::*`
-4. Remove type definitions from `handler.rs`
+3. Import types in `server.rs` via `use crate::tools::types::*`
+4. Remove type definitions from `server.rs`
 5. Move default value helpers to `tools/types.rs`
 
 ### Phase 2: Extract Prompt Handling (Low Risk)
@@ -72,12 +72,12 @@ src/
 2. Create `src/prompts/diagnose.rs` with diagnose_port logic
 3. Create `src/prompts/interactive.rs` with interactive_terminal logic
 4. Add `pub mod prompts` to `src/lib.rs`
-5. Keep `#[prompt_router]` impl in `handler.rs` but call module functions
+5. Keep `#[prompt_router]` impl in `server.rs` but call module functions
 
 ### Phase 3: Extract Resources (Medium Risk)
 1. Create `src/resources/mod.rs` with URI constants + ResourceUriKind
 2. Create `src/resources/types.rs` with ConnectionsResource
-3. Move `parse_resource_uri()` and `ConnectionsResource` from `handler.rs`
+3. Move `parse_resource_uri()` and `ConnectionsResource` from `server.rs`
 4. Keep `read_resource` in `server.rs` but use resource helpers
 
 ### Phase 4: Extract Security (Low Risk)
@@ -91,7 +91,7 @@ src/
 3. Create `src/tools/control_ops.rs` with set_dtr_rts, send_break
 4. Create `src/tools/pattern_ops.rs` with wait_for
 5. Create `src/tools/stream_ops.rs` with subscribe, unsubscribe, stream_rx
-6. Keep `#[tool_router]` impl in `handler.rs` but call module functions
+6. Keep `#[tool_router]` impl in `server.rs` but call module functions
 
 ### Phase 6: Reorganize Files (High Risk)
 1. Rename `handler.rs` → `server.rs`
@@ -100,7 +100,7 @@ src/
 4. Verify rmcp macros still work
 
 ### Phase 7: Test Organization
-1. Move unit tests from `handler.rs` to relevant modules
+1. Move unit tests from `server.rs` to relevant modules
 2. Keep integration tests in `tests/` directory
 3. Add module-level unit tests for extracted logic
 
