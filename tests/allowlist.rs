@@ -33,6 +33,7 @@ async fn allowlist_blocks_unauthorized_port() {
             .join("target/debug/serial-mcp-server"),
     )
     .configure(|cmd| {
+        cmd.env("RUST_LOG", "off");
         // Only allow /dev/ttyACM1
         cmd.env("SERIAL_MCP_ALLOWLIST", "/dev/ttyACM1");
     });
@@ -88,6 +89,7 @@ async fn allowlist_allows_authorized_port() {
             .join("target/debug/serial-mcp-server"),
     )
     .configure(|cmd| {
+        cmd.env("RUST_LOG", "off");
         // Allow the user's device
         cmd.env("SERIAL_MCP_ALLOWLIST", "/dev/ttyACM0");
     });
@@ -157,6 +159,7 @@ async fn allowlist_glob_pattern_works() {
             .join("target/debug/serial-mcp-server"),
     )
     .configure(|cmd| {
+        cmd.env("RUST_LOG", "off");
         // Allow all /dev/ttyACM* and /dev/ttyUSB*
         cmd.env("SERIAL_MCP_ALLOWLIST", "/dev/ttyACM*,/dev/ttyUSB*");
     });
