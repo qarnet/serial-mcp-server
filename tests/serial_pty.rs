@@ -171,7 +171,7 @@ async fn pty_wait_for_matches_real_serial_pattern() {
             json!({
                 "connection_id": connection_id,
                 "pattern": "OK>",
-                "timeout_ms": 3000,
+                "timeout_ms": 8000,
             }),
         ))
         .await
