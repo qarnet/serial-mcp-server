@@ -30,7 +30,7 @@ async fn blob_resource_template_is_advertised() {
             .join("target/debug/serial-mcp-server"),
     )
     .configure(|cmd| {
-        cmd.env("RUST_LOG", "warn");
+        cmd.env("RUST_LOG", "off");
     });
 
     let transport = TokioChildProcess::new(cmd).expect("spawn stdio server");
@@ -65,7 +65,7 @@ async fn resource_uri_parsing_includes_raw_suffix() {
             .join("target/debug/serial-mcp-server"),
     )
     .configure(|cmd| {
-        cmd.env("RUST_LOG", "warn");
+        cmd.env("RUST_LOG", "off");
     });
 
     let transport = TokioChildProcess::new(cmd).expect("spawn stdio server");

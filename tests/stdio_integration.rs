@@ -52,7 +52,7 @@ async fn start_stdio_client() -> rmcp::service::RunningService<rmcp::service::Ro
             .join("target/debug/serial-mcp-server"),
     )
     .configure(|cmd| {
-        cmd.env("RUST_LOG", "warn");
+        cmd.env("RUST_LOG", "off");
     });
 
     let transport = TokioChildProcess::new(cmd).expect("spawn stdio server");
@@ -125,7 +125,7 @@ async fn stdio_full_connection_lifecycle_with_hardware() {
             .join("target/debug/serial-mcp-server"),
     )
     .configure(|cmd| {
-        cmd.env("RUST_LOG", "warn");
+        cmd.env("RUST_LOG", "off");
     });
 
     let transport = TokioChildProcess::new(cmd).expect("spawn stdio server");

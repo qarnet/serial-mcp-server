@@ -30,7 +30,7 @@ async fn resource_subscription_works() {
             .join("target/debug/serial-mcp-server"),
     )
     .configure(|cmd| {
-        cmd.env("RUST_LOG", "warn");
+        cmd.env("RUST_LOG", "off");
     });
 
     let transport = TokioChildProcess::new(cmd).expect("spawn stdio server");
@@ -61,7 +61,7 @@ async fn resource_subscribe_unsubscribe_roundtrip() {
             .join("target/debug/serial-mcp-server"),
     )
     .configure(|cmd| {
-        cmd.env("RUST_LOG", "warn");
+        cmd.env("RUST_LOG", "off");
     });
 
     let transport = TokioChildProcess::new(cmd).expect("spawn stdio server");

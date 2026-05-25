@@ -166,6 +166,14 @@ SERIAL_MCP_ALLOWLIST="/dev/ttyACM0,/dev/ttyUSB*,COM3"
 **Priority:** Low
 **Status:** NOT STARTED
 
+### 4.4 Cross-process Port Locking (Advisory)
+**Priority:** Low
+**Status:** NOT STARTED
+
+**Problem:** Two separate server processes may both open the same physical port.
+
+**Suggestion:** Add an *advisory lockfile per port* (e.g. `flock` on a hashed filename under `/var/lock/serial-mcp-server/`) held for the lifetime of an open connection, so port exclusivity is enforced across processes on the same host.
+
 **Resource:** `serial://connections/{id}/stats`
 
 **Implementation needed:**
