@@ -12,6 +12,7 @@ use crate::serial::{FlushTarget, PortInfo};
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct OpenArgs {
     pub port: String,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub baud_rate: u32,
     #[serde(default = "default_data_bits")]
     pub data_bits: String,
@@ -40,8 +41,10 @@ pub struct WriteArgs {
 pub struct ReadArgs {
     pub connection_id: String,
     #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub timeout_ms: Option<u64>,
     #[serde(default = "default_max_bytes")]
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub max_bytes: usize,
     #[serde(default = "default_encoding")]
     pub encoding: String,
@@ -65,6 +68,7 @@ pub struct SetDtrRtsArgs {
 pub struct SendBreakArgs {
     pub connection_id: String,
     #[serde(default = "default_break_duration_ms")]
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub duration_ms: u64,
 }
 
@@ -74,8 +78,10 @@ pub struct SubscribeArgs {
     #[serde(default = "default_encoding")]
     pub encoding: String,
     #[serde(default = "default_subscribe_chunk_bytes")]
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub max_chunk_bytes: usize,
     #[serde(default = "default_subscribe_poll_ms")]
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub poll_interval_ms: u64,
 }
 
@@ -91,8 +97,10 @@ pub struct WaitForArgs {
     #[serde(default = "default_encoding")]
     pub pattern_encoding: String,
     #[serde(default = "default_wait_timeout_ms")]
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub timeout_ms: u64,
     #[serde(default = "default_wait_max_bytes")]
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub max_bytes: usize,
     #[serde(default = "default_encoding")]
     pub response_encoding: String,
@@ -102,6 +110,7 @@ pub struct WaitForArgs {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ListPortsResult {
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub count: usize,
     pub ports: Vec<PortInfo>,
 }
@@ -110,6 +119,7 @@ pub struct ListPortsResult {
 pub struct OpenResult {
     pub connection_id: String,
     pub port: String,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub baud_rate: u32,
 }
 
@@ -121,6 +131,7 @@ pub struct CloseResult {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct WriteResult {
     pub connection_id: String,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub bytes_written: usize,
     pub encoding: String,
 }
@@ -128,10 +139,12 @@ pub struct WriteResult {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ReadResult {
     pub connection_id: String,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub bytes_read: usize,
     pub encoding: String,
     pub data: String,
     pub timed_out: bool,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub timeout_ms: u64,
 }
 
@@ -151,6 +164,7 @@ pub struct SetDtrRtsResult {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct SendBreakResult {
     pub connection_id: String,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub duration_ms: u64,
 }
 
@@ -158,7 +172,9 @@ pub struct SendBreakResult {
 pub struct SubscribeResult {
     pub connection_id: String,
     pub encoding: String,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub max_chunk_bytes: usize,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub poll_interval_ms: u64,
     pub replaced_previous: bool,
 }
@@ -175,9 +191,12 @@ pub struct WaitForResult {
     pub matched: bool,
     pub timed_out: bool,
     pub data: String,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub bytes_read: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub match_index: Option<usize>,
+    #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub timeout_ms: u64,
     pub response_encoding: String,
 }

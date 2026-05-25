@@ -7,6 +7,7 @@ pub struct DiagnosePortArgs {
     pub port: String,
     /// Optional baud rate to try first. Defaults are tried otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub baud_rate: Option<u32>,
 }
 
