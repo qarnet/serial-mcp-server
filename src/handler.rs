@@ -6,7 +6,6 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use rmcp::{
@@ -16,37 +15,30 @@ use rmcp::{
     },
     model::*,
     prompt, prompt_handler, prompt_router,
-    service::{Peer, RequestContext},
+    service::RequestContext,
     task_handler,
     task_manager::OperationProcessor,
     tool, tool_handler, tool_router, ErrorData as McpError, Json, RoleServer, ServerHandler,
 };
 
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
-use crate::codec::{self, Encoding};
-use crate::error::SerialError;
 use crate::security::SecurityManager;
-use crate::serial::{
-    ConnectionConfig, ConnectionManager, ConnectionSummary, DataBits, FlowControl, Parity,
-    PortInfo, SerialConnection, StopBits,
-};
-
-/// Default read timeout used in the response when the caller did not specify one.
-const DEFAULT_READ_TIMEOUT_MS: u64 = 1000;
+use crate::serial::{ConnectionManager, ConnectionSummary, PortInfo};
 
 use crate::prompts::types::*;
 use crate::prompts::{diagnose, interactive};
 use crate::tools::types::*;
+use crate::tools::{control_ops, io_ops, pattern_ops, port_ops, stream_ops};
 
 // ---- Handler ---------------------------------------------------------------
 
 #[derive(Clone)]
 pub struct SerialHandler {
-    connections: Arc<ConnectionManager>,
+    pub(crate) connections: Arc<ConnectionManager>,
     /// Per-connection background RX-streaming tasks, indexed by connection id.
     /// Dropping a handle aborts the task.
-    streams: Arc<tokio::sync::Mutex<HashMap<String, StreamHandle>>>,
+    streams: Arc<tokio::sync::Mutex<HashMap<String, stream_ops::StreamHandle>>>,
     /// MCP task manager for opt-in long-running tool invocations
     /// (read, wait_for, send_break). Clients can submit those tools as
     /// tasks and cancel them via the standard MCP tasks/cancel request.
@@ -57,19 +49,8 @@ pub struct SerialHandler {
     #[allow(dead_code)]
     prompt_router: PromptRouter<SerialHandler>,
     security: SecurityManager,
-    /// Active resource subscribers by URI.
-    subscribers: Arc<tokio::sync::Mutex<HashMap<String, ()>>>,
-}
-
-/// RAII wrapper around a streaming task. Aborts the task on drop.
-struct StreamHandle {
-    join: tokio::task::JoinHandle<()>,
-}
-
-impl Drop for StreamHandle {
-    fn drop(&mut self) {
-        self.join.abort();
-    }
+    /// Active resource subscribers by URI (simple reference count).
+    subscribers: Arc<tokio::sync::Mutex<HashMap<String, usize>>>,
 }
 
 #[tool_router]
@@ -98,14 +79,7 @@ impl SerialHandler {
 
     #[tool(description = "List all available serial ports on the system")]
     async fn list_ports(&self) -> Result<Json<ListPortsResult>, String> {
-        debug!("Listing serial ports");
-        let ports = PortInfo::list_available()
-            .map_err(|e| log_tool_err("list_ports", "Failed to list ports", e))?;
-        info!("Found {} serial ports", ports.len());
-        Ok(Json(ListPortsResult {
-            count: ports.len(),
-            ports,
-        }))
+        port_ops::list_ports().await
     }
 
     #[tool(description = "Open a serial port connection with specified configuration")]
@@ -114,55 +88,14 @@ impl SerialHandler {
         Parameters(args): Parameters<OpenArgs>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<Json<OpenResult>, String> {
-        let config = parse_open_args(args)?;
-        let port = config.port.clone();
-        let baud_rate = config.baud_rate;
-        debug!("Opening {} @ {}", port, baud_rate);
-
-        // Check allowlist
-        if !self.security.is_port_allowed(&port) {
-            return Err(format!(
-                "Port '{}' is not in the allowlist. Allowed patterns: {}",
-                port,
-                self.security.allowlist_summary()
-            ));
-        }
-
-        let connection_id = self
-            .connections
-            .open(config)
-            .await
-            .map_err(|e| log_tool_err("open", &format!("Failed to open port {port}"), e))?;
-        info!("Opened connection {} -> {}", connection_id, port);
-
-        // Notify clients that the resource list has changed
-        if let Err(e) = ctx.peer.notify_resource_list_changed().await {
-            debug!("Failed to notify resource list changed: {}", e);
-        }
-
-        // Notify subscribers to the specific connection resource
-        let conn_uri = format!("{URI_CONNECTION_PREFIX}{connection_id}");
-        let subs = self.subscribers.lock().await;
-        if subs.contains_key(&conn_uri) {
-            drop(subs);
-            if let Err(e) = ctx
-                .peer
-                .notify_resource_updated(rmcp::model::ResourceUpdatedNotificationParam::new(
-                    conn_uri,
-                ))
-                .await
-            {
-                debug!("Failed to notify resource updated: {}", e);
-            }
-        } else {
-            drop(subs);
-        }
-
-        Ok(Json(OpenResult {
-            connection_id,
-            port,
-            baud_rate,
-        }))
+        port_ops::open(
+            &self.connections,
+            &self.security,
+            &self.subscribers,
+            args,
+            ctx,
+        )
+        .await
     }
 
     #[tool(description = "Close an open serial port connection")]
@@ -171,45 +104,7 @@ impl SerialHandler {
         Parameters(args): Parameters<CloseArgs>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<Json<CloseResult>, String> {
-        debug!("Closing {}", args.connection_id);
-        self.connections
-            .close(&args.connection_id)
-            .await
-            .map_err(|e| {
-                log_tool_err(
-                    "close",
-                    &format!("Failed to close connection {}", args.connection_id),
-                    e,
-                )
-            })?;
-        info!("Closed connection {}", args.connection_id);
-
-        // Notify clients that the resource list has changed
-        if let Err(e) = ctx.peer.notify_resource_list_changed().await {
-            debug!("Failed to notify resource list changed: {}", e);
-        }
-
-        // Notify subscribers to the specific connection resource
-        let conn_uri = format!("{URI_CONNECTION_PREFIX}{}", args.connection_id);
-        let subs = self.subscribers.lock().await;
-        if subs.contains_key(&conn_uri) {
-            drop(subs);
-            if let Err(e) = ctx
-                .peer
-                .notify_resource_updated(rmcp::model::ResourceUpdatedNotificationParam::new(
-                    conn_uri,
-                ))
-                .await
-            {
-                debug!("Failed to notify resource updated: {}", e);
-            }
-        } else {
-            drop(subs);
-        }
-
-        Ok(Json(CloseResult {
-            connection_id: args.connection_id,
-        }))
+        port_ops::close(&self.connections, &self.subscribers, args, ctx).await
     }
 
     #[tool(description = "Write data to a serial port connection")]
@@ -217,24 +112,7 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<WriteArgs>,
     ) -> Result<Json<WriteResult>, String> {
-        debug!("Write to {} ({})", args.connection_id, args.encoding);
-        let encoding = parse_encoding(&args.encoding)?;
-        let connection = self.lookup_connection(&args.connection_id).await?;
-        let bytes = codec::decode(encoding, &args.data)
-            .map_err(|e| format!("Data decoding failed - {e}"))?;
-        let bytes_written = connection.write(&bytes).await.map_err(|e| {
-            log_tool_err(
-                "write",
-                &format!("Data sending failed on {}", args.connection_id),
-                e,
-            )
-        })?;
-        debug!("Wrote {} bytes to {}", bytes_written, args.connection_id);
-        Ok(Json(WriteResult {
-            connection_id: args.connection_id,
-            bytes_written,
-            encoding: encoding.to_string(),
-        }))
+        io_ops::write(&self.connections, args).await
     }
 
     #[tool(
@@ -245,14 +123,7 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<ReadArgs>,
     ) -> Result<Json<ReadResult>, String> {
-        debug!(
-            "Read from {} (timeout {:?})",
-            args.connection_id, args.timeout_ms
-        );
-        let encoding = parse_encoding(&args.encoding)?;
-        let connection = self.lookup_connection(&args.connection_id).await?;
-        let outcome = read_bytes(&connection, args.max_bytes, args.timeout_ms).await?;
-        build_read_result(outcome, args.connection_id, encoding, args.timeout_ms)
+        io_ops::read(&self.connections, args).await
     }
 
     #[tool(
@@ -262,20 +133,7 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<FlushArgs>,
     ) -> Result<Json<FlushResult>, String> {
-        debug!("Flush {} target={:?}", args.connection_id, args.target);
-        let connection = self.lookup_connection(&args.connection_id).await?;
-        connection.flush_buffers(args.target).await.map_err(|e| {
-            log_tool_err(
-                "flush",
-                &format!("Failed to flush {}", args.connection_id),
-                e,
-            )
-        })?;
-        info!("Flushed {} ({:?})", args.connection_id, args.target);
-        Ok(Json(FlushResult {
-            connection_id: args.connection_id,
-            target: args.target,
-        }))
+        io_ops::flush(&self.connections, args).await
     }
 
     #[tool(
@@ -285,30 +143,7 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<SetDtrRtsArgs>,
     ) -> Result<Json<SetDtrRtsResult>, String> {
-        debug!(
-            "set_dtr_rts {} dtr={} rts={}",
-            args.connection_id, args.dtr, args.rts
-        );
-        let connection = self.lookup_connection(&args.connection_id).await?;
-        connection
-            .set_dtr_rts(args.dtr, args.rts)
-            .await
-            .map_err(|e| {
-                log_tool_err(
-                    "set_dtr_rts",
-                    &format!("Failed to set control lines on {}", args.connection_id),
-                    e,
-                )
-            })?;
-        info!(
-            "Control lines on {} set to dtr={} rts={}",
-            args.connection_id, args.dtr, args.rts
-        );
-        Ok(Json(SetDtrRtsResult {
-            connection_id: args.connection_id,
-            dtr: args.dtr,
-            rts: args.rts,
-        }))
+        control_ops::set_dtr_rts(&self.connections, args).await
     }
 
     #[tool(
@@ -319,26 +154,7 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<SendBreakArgs>,
     ) -> Result<Json<SendBreakResult>, String> {
-        debug!(
-            "send_break {} duration={}ms",
-            args.connection_id, args.duration_ms
-        );
-        let connection = self.lookup_connection(&args.connection_id).await?;
-        connection.send_break(args.duration_ms).await.map_err(|e| {
-            log_tool_err(
-                "send_break",
-                &format!("Failed to send break on {}", args.connection_id),
-                e,
-            )
-        })?;
-        info!(
-            "Sent break on {} for {}ms",
-            args.connection_id, args.duration_ms
-        );
-        Ok(Json(SendBreakResult {
-            connection_id: args.connection_id,
-            duration_ms: args.duration_ms,
-        }))
+        control_ops::send_break(&self.connections, args).await
     }
 
     #[tool(
@@ -349,32 +165,7 @@ impl SerialHandler {
         Parameters(args): Parameters<SubscribeArgs>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<Json<SubscribeResult>, String> {
-        debug!(
-            "subscribe {} encoding={} chunk={} poll={}",
-            args.connection_id, args.encoding, args.max_chunk_bytes, args.poll_interval_ms
-        );
-        let encoding = parse_encoding(&args.encoding)?;
-        let connection = self.lookup_connection(&args.connection_id).await?;
-        let peer = ctx.peer.clone();
-
-        let id = args.connection_id.clone();
-        let chunk_bytes = args.max_chunk_bytes;
-        let poll_ms = args.poll_interval_ms;
-        let join = tokio::spawn(stream_rx(peer, connection, encoding, chunk_bytes, poll_ms));
-
-        let mut streams = self.streams.lock().await;
-        let replaced_previous = streams.insert(id.clone(), StreamHandle { join }).is_some();
-        info!(
-            "subscribed RX stream for {} (replaced={})",
-            id, replaced_previous
-        );
-        Ok(Json(SubscribeResult {
-            connection_id: id,
-            encoding: encoding.to_string(),
-            max_chunk_bytes: chunk_bytes,
-            poll_interval_ms: poll_ms,
-            replaced_previous,
-        }))
+        stream_ops::subscribe(&self.connections, &self.streams, args, ctx).await
     }
 
     #[tool(
@@ -384,17 +175,7 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<UnsubscribeArgs>,
     ) -> Result<Json<UnsubscribeResult>, String> {
-        debug!("unsubscribe {}", args.connection_id);
-        let mut streams = self.streams.lock().await;
-        let was_active = streams.remove(&args.connection_id).is_some();
-        info!(
-            "unsubscribed {} (was_active={})",
-            args.connection_id, was_active
-        );
-        Ok(Json(UnsubscribeResult {
-            connection_id: args.connection_id,
-            was_active,
-        }))
+        stream_ops::unsubscribe(&self.streams, args).await
     }
 
     #[tool(
@@ -405,322 +186,11 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<WaitForArgs>,
     ) -> Result<Json<WaitForResult>, String> {
-        debug!(
-            "wait_for {} pattern_encoding={} timeout={}ms max_bytes={}",
-            args.connection_id, args.pattern_encoding, args.timeout_ms, args.max_bytes
-        );
-        let pattern_encoding = parse_encoding(&args.pattern_encoding)?;
-        let response_encoding = parse_encoding(&args.response_encoding)?;
-        let pattern = codec::decode(pattern_encoding, &args.pattern)
-            .map_err(|e| format!("Pattern decoding failed - {e}"))?;
-        if pattern.is_empty() {
-            return Err("Pattern must not be empty".into());
-        }
-
-        let connection = self.lookup_connection(&args.connection_id).await?;
-        let outcome =
-            read_until_pattern(&connection, &pattern, args.timeout_ms, args.max_bytes).await?;
-        let bytes_read = outcome.bytes.len();
-        let data = codec::encode(response_encoding, &outcome.bytes)
-            .map_err(|e| format!("Response encoding failed - {e}"))?;
-        Ok(Json(WaitForResult {
-            connection_id: args.connection_id,
-            matched: outcome.match_index.is_some(),
-            timed_out: outcome.timed_out,
-            data,
-            bytes_read,
-            match_index: outcome.match_index,
-            timeout_ms: args.timeout_ms,
-            response_encoding: response_encoding.to_string(),
-        }))
+        pattern_ops::wait_for(&self.connections, args).await
     }
 }
 
-// Lookup is split out so the macro-generated tool methods stay focused.
-impl SerialHandler {
-    /// Resolve an MCP connection id into a live [`SerialConnection`].
-    async fn lookup_connection(&self, id: &str) -> Result<Arc<SerialConnection>, String> {
-        self.connections
-            .get(id)
-            .await
-            .map_err(|_| format!("Connection ID {id} not found"))
-    }
-}
-
-// ---- Tool helpers (free fns) ------------------------------------------------
-
-/// Outcome of a read call. `timed_out` distinguishes the genuine
-/// read-timeout case from a successful read of `bytes`.
-struct ReadOutcome {
-    bytes: Vec<u8>,
-    timed_out: bool,
-}
-
-async fn read_bytes(
-    connection: &SerialConnection,
-    max_bytes: usize,
-    timeout_ms: Option<u64>,
-) -> Result<ReadOutcome, String> {
-    // How long to keep draining after the first bytes arrive.  USB CDC-ACM
-    // devices deliver data in USB packets, so a single write may be split
-    // across several packets.  This settle window collects them all without
-    // waiting for the full user-supplied timeout.
-    const SETTLE_MS: u64 = 50;
-
-    let effective_timeout = timeout_ms.unwrap_or(DEFAULT_READ_TIMEOUT_MS);
-    let deadline = Instant::now() + Duration::from_millis(effective_timeout);
-    let mut buf = vec![0u8; max_bytes];
-
-    // Wait for the first bytes to arrive.
-    let first_n = match connection.read(&mut buf, Some(effective_timeout)).await {
-        Ok(n) => n,
-        Err(SerialError::ReadTimeout) => {
-            return Ok(ReadOutcome {
-                bytes: Vec::new(),
-                timed_out: true,
-            })
-        }
-        Err(e) => return Err(log_tool_err("read", "Data reading failed", e)),
-    };
-
-    // Drain any additional bytes that arrive within the settle window.
-    let mut total = first_n;
-    while total < max_bytes {
-        let remaining = deadline
-            .saturating_duration_since(Instant::now())
-            .as_millis() as u64;
-        let settle = remaining.min(SETTLE_MS);
-        if settle == 0 {
-            break;
-        }
-        match connection.read(&mut buf[total..], Some(settle)).await {
-            Ok(n) if n > 0 => total += n,
-            _ => break,
-        }
-    }
-
-    buf.truncate(total);
-    Ok(ReadOutcome {
-        bytes: buf,
-        timed_out: false,
-    })
-}
-
-/// Background RX-streaming loop. Polls the connection in small chunks and
-/// forwards every non-empty read to the connected MCP peer as a
-/// `notifications/message` event with logger=`"serial:<connection_id>"`.
-/// Exits silently when the peer disconnects or the connection errors.
-async fn stream_rx(
-    peer: Peer<RoleServer>,
-    connection: Arc<SerialConnection>,
-    encoding: Encoding,
-    max_chunk_bytes: usize,
-    poll_interval_ms: u64,
-) {
-    let logger = format!("serial:{}", connection.id());
-    let mut buf = vec![0u8; max_chunk_bytes];
-    loop {
-        match connection.read(&mut buf, Some(poll_interval_ms)).await {
-            Ok(0) | Err(SerialError::ReadTimeout) => continue,
-            Ok(n) => {
-                let chunk = &buf[..n];
-                let encoded = match codec::encode(encoding, chunk) {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                };
-                let payload = serde_json::json!({
-                    "connection_id": connection.id(),
-                    "bytes_read": n,
-                    "encoding": encoding.to_string(),
-                    "data": encoded,
-                });
-                let param = LoggingMessageNotificationParam {
-                    level: LoggingLevel::Info,
-                    logger: Some(logger.clone()),
-                    data: payload,
-                };
-                if let Err(e) = peer.notify_logging_message(param).await {
-                    error!("RX stream peer disconnected: {}", e);
-                    break;
-                }
-            }
-            Err(e) => {
-                error!("RX stream read error on {}: {}", connection.id(), e);
-                break;
-            }
-        }
-    }
-}
-
-/// Read incrementally from `connection` until `pattern` appears in the
-/// accumulated buffer, `max_bytes` are buffered without a match, or
-/// `timeout_ms` elapses since this call began.
-async fn read_until_pattern(
-    connection: &SerialConnection,
-    pattern: &[u8],
-    timeout_ms: u64,
-    max_bytes: usize,
-) -> Result<WaitOutcome, String> {
-    const CHUNK_CAPACITY: usize = 256;
-    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-    let mut accumulated: Vec<u8> = Vec::with_capacity(CHUNK_CAPACITY.min(max_bytes));
-
-    loop {
-        if let Some(idx) = find_subslice(&accumulated, pattern) {
-            return Ok(WaitOutcome {
-                bytes: accumulated,
-                match_index: Some(idx),
-                timed_out: false,
-            });
-        }
-        if accumulated.len() >= max_bytes {
-            return Ok(WaitOutcome {
-                bytes: accumulated,
-                match_index: None,
-                timed_out: false,
-            });
-        }
-        let now = Instant::now();
-        if now >= deadline {
-            return Ok(WaitOutcome {
-                bytes: accumulated,
-                match_index: None,
-                timed_out: true,
-            });
-        }
-
-        let remaining_ms = (deadline - now).as_millis() as u64;
-        let room = (max_bytes - accumulated.len()).min(CHUNK_CAPACITY);
-        let mut chunk = vec![0u8; room];
-        match connection.read(&mut chunk, Some(remaining_ms)).await {
-            Ok(0) => continue,
-            Ok(n) => {
-                chunk.truncate(n);
-                accumulated.extend_from_slice(&chunk);
-            }
-            Err(SerialError::ReadTimeout) => {
-                return Ok(WaitOutcome {
-                    bytes: accumulated,
-                    match_index: None,
-                    timed_out: true,
-                });
-            }
-            Err(e) => return Err(log_tool_err("wait_for", "Read failed during wait", e)),
-        }
-    }
-}
-
-struct WaitOutcome {
-    bytes: Vec<u8>,
-    match_index: Option<usize>,
-    timed_out: bool,
-}
-
-/// Find the first byte offset where `needle` appears in `haystack`. Returns
-/// `None` if `needle` is empty or absent.
-fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() || haystack.len() < needle.len() {
-        return None;
-    }
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
-}
-
-fn build_read_result(
-    outcome: ReadOutcome,
-    connection_id: String,
-    encoding: Encoding,
-    requested_timeout_ms: Option<u64>,
-) -> Result<Json<ReadResult>, String> {
-    let timeout_ms = requested_timeout_ms.unwrap_or(DEFAULT_READ_TIMEOUT_MS);
-    if outcome.timed_out {
-        return Ok(Json(ReadResult {
-            connection_id,
-            bytes_read: 0,
-            encoding: encoding.to_string(),
-            data: String::new(),
-            timed_out: true,
-            timeout_ms,
-        }));
-    }
-    let bytes_read = outcome.bytes.len();
-    let data = codec::encode(encoding, &outcome.bytes)
-        .map_err(|e| format!("Data encoding failed - {e}"))?;
-    Ok(Json(ReadResult {
-        connection_id,
-        bytes_read,
-        encoding: encoding.to_string(),
-        data,
-        timed_out: false,
-        timeout_ms,
-    }))
-}
-
-fn parse_encoding(raw: &str) -> Result<Encoding, String> {
-    raw.parse::<Encoding>()
-        .map_err(|e| format!("Unsupported encoding - {e}"))
-}
-
-/// Strictly parse [`OpenArgs`] into a [`ConnectionConfig`]. An unrecognised
-/// value here is an error rather than a silent fallback to defaults.
-fn parse_open_args(args: OpenArgs) -> Result<ConnectionConfig, String> {
-    Ok(ConnectionConfig {
-        port: args.port,
-        baud_rate: args.baud_rate,
-        data_bits: parse_data_bits(&args.data_bits)?,
-        stop_bits: parse_stop_bits(&args.stop_bits)?,
-        parity: parse_parity(&args.parity)?,
-        flow_control: parse_flow_control(&args.flow_control)?,
-    })
-}
-
-fn parse_data_bits(raw: &str) -> Result<DataBits, String> {
-    match raw {
-        "5" => Ok(DataBits::Five),
-        "6" => Ok(DataBits::Six),
-        "7" => Ok(DataBits::Seven),
-        "8" => Ok(DataBits::Eight),
-        other => Err(format!("Invalid data_bits {other:?} (expected 5/6/7/8)")),
-    }
-}
-
-fn parse_stop_bits(raw: &str) -> Result<StopBits, String> {
-    match raw {
-        "1" => Ok(StopBits::One),
-        "2" => Ok(StopBits::Two),
-        other => Err(format!("Invalid stop_bits {other:?} (expected 1/2)")),
-    }
-}
-
-fn parse_parity(raw: &str) -> Result<Parity, String> {
-    match raw.to_lowercase().as_str() {
-        "none" => Ok(Parity::None),
-        "odd" => Ok(Parity::Odd),
-        "even" => Ok(Parity::Even),
-        other => Err(format!("Invalid parity {other:?} (expected none/odd/even)")),
-    }
-}
-
-fn parse_flow_control(raw: &str) -> Result<FlowControl, String> {
-    match raw.to_lowercase().as_str() {
-        "none" => Ok(FlowControl::None),
-        "software" => Ok(FlowControl::Software),
-        "hardware" => Ok(FlowControl::Hardware),
-        other => Err(format!(
-            "Invalid flow_control {other:?} (expected none/software/hardware)"
-        )),
-    }
-}
-
-// ---- Tiny error builders ----------------------------------------------------
-
-/// Log a tool-level failure and format a user-visible error string that the
-/// rmcp router will surface as a `CallToolResult { isError: true, ... }`.
-fn log_tool_err<E: std::fmt::Display>(op: &str, context: &str, err: E) -> String {
-    error!("{} failed: {}", op, err);
-    format!("{context} - {err}")
-}
+// ---- Tool helpers (extracted to src/tools/helpers.rs) -----------------------
 
 // ---- ServerHandler boilerplate ----------------------------------------------
 
@@ -981,7 +451,7 @@ impl ServerHandler for SerialHandler {
     ) -> Result<(), McpError> {
         let uri = request.uri;
         let mut subscribers = self.subscribers.lock().await;
-        subscribers.insert(uri.clone(), ());
+        *subscribers.entry(uri.clone()).or_insert(0) += 1;
         debug!("Client subscribed to resource {}", uri);
         Ok(())
     }
@@ -993,7 +463,12 @@ impl ServerHandler for SerialHandler {
     ) -> Result<(), McpError> {
         let uri = request.uri;
         let mut subscribers = self.subscribers.lock().await;
-        subscribers.remove(&uri);
+        if let Some(count) = subscribers.get_mut(&uri) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                subscribers.remove(&uri);
+            }
+        }
         debug!("Client unsubscribed from resource {}", uri);
         Ok(())
     }
@@ -1003,12 +478,14 @@ impl ServerHandler for SerialHandler {
 
 use crate::resources::{
     parse_resource_uri, ConnectionsResource, ResourceUriKind, URI_CONNECTIONS,
-    URI_CONNECTION_PREFIX, URI_CONNECTION_RAW_TEMPLATE, URI_CONNECTION_TEMPLATE, URI_PORTS,
+    URI_CONNECTION_RAW_TEMPLATE, URI_CONNECTION_TEMPLATE, URI_PORTS,
 };
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codec::Encoding;
+    use crate::tools::helpers::*;
 
     #[test]
     fn open_args_parsed_strictly() {
