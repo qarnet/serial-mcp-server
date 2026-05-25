@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
-use glob::Pattern;
 use rmcp::{
     handler::server::{
         router::{prompt::PromptRouter, tool::ToolRouter},
@@ -27,6 +26,7 @@ use tracing::{debug, error, info};
 
 use crate::codec::{self, Encoding};
 use crate::error::SerialError;
+use crate::security::SecurityManager;
 use crate::serial::{
     ConnectionConfig, ConnectionManager, ConnectionSummary, DataBits, FlowControl, Parity,
     PortInfo, SerialConnection, StopBits,
@@ -56,8 +56,7 @@ pub struct SerialHandler {
     tool_router: ToolRouter<SerialHandler>,
     #[allow(dead_code)]
     prompt_router: PromptRouter<SerialHandler>,
-    /// Port allowlist patterns. If empty, all ports are allowed.
-    allowlist: Vec<Pattern>,
+    security: SecurityManager,
     /// Active resource subscribers by URI.
     subscribers: Arc<tokio::sync::Mutex<HashMap<String, ()>>>,
 }
@@ -85,14 +84,14 @@ impl SerialHandler {
     /// with a fake (in-memory) connection before exposing the handler over
     /// MCP, instead of going through the OS-level `open` path.
     pub fn with_manager(connections: Arc<ConnectionManager>) -> Self {
-        let allowlist = Self::parse_allowlist_env();
+        let security = SecurityManager::from_env();
         Self {
             connections,
             streams: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             processor: Arc::new(tokio::sync::Mutex::new(OperationProcessor::new())),
             tool_router: Self::tool_router(),
             prompt_router: Self::prompt_router(),
-            allowlist,
+            security,
             subscribers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
@@ -121,11 +120,11 @@ impl SerialHandler {
         debug!("Opening {} @ {}", port, baud_rate);
 
         // Check allowlist
-        if !self.is_port_allowed(&port) {
+        if !self.security.is_port_allowed(&port) {
             return Err(format!(
                 "Port '{}' is not in the allowlist. Allowed patterns: {}",
                 port,
-                self.allowlist_summary()
+                self.security.allowlist_summary()
             ));
         }
 
@@ -733,58 +732,9 @@ impl Default for SerialHandler {
 
 // ---- Prompt templates ------------------------------------------------------
 
-// ---- Allowlist helpers ------------------------------------------------------
+// ---- Completion helper ------------------------------------------------------
 
 impl SerialHandler {
-    /// Parse `SERIAL_MCP_ALLOWLIST` environment variable into glob patterns.
-    /// Returns empty Vec if not set (allowing all ports).
-    fn parse_allowlist_env() -> Vec<Pattern> {
-        let env_val = std::env::var("SERIAL_MCP_ALLOWLIST").unwrap_or_default();
-        if env_val.is_empty() {
-            return Vec::new();
-        }
-
-        let patterns: Vec<Pattern> = env_val
-            .split(',')
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .filter_map(|s| Pattern::new(s).ok())
-            .collect();
-
-        if !patterns.is_empty() {
-            info!(
-                "Port allowlist active: {}",
-                patterns
-                    .iter()
-                    .map(|p| p.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-        }
-        patterns
-    }
-
-    /// Check if a port matches the allowlist. Empty allowlist = allow all.
-    fn is_port_allowed(&self, port: &str) -> bool {
-        if self.allowlist.is_empty() {
-            return true;
-        }
-        self.allowlist.iter().any(|pattern| pattern.matches(port))
-    }
-
-    /// Human-readable summary of allowlist patterns for error messages.
-    fn allowlist_summary(&self) -> String {
-        if self.allowlist.is_empty() {
-            "(all ports allowed)".to_string()
-        } else {
-            self.allowlist
-                .iter()
-                .map(|p| p.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        }
-    }
-
     /// Generate completion suggestions for tool/resource arguments.
     async fn get_completions(&self, r#ref: &Reference, argument: &ArgumentInfo) -> Vec<String> {
         match r#ref {
