@@ -18,7 +18,7 @@ src/
   codec.rs          184 LOC   Encoding enum + decode/encode + 9 tests
   serial.rs         600 LOC   PortInfo, SerialIo trait, ConnectionManager
                               + LoopbackIo test backend + 12 tests
-  handler.rs       ~1500 LOC  11 tools, 3 resources, 2 prompts,
+  server.rs        ~1500 LOC  11 tools, 3 resources, 2 prompts,
                               resource change notifications, port allowlist,
                               all response structs, parse helpers,
                               streaming + task framework wiring, 15 tests
@@ -57,7 +57,7 @@ yourself while reading**.
 
 Six lines. Confirms the public surface: `Result`, `SerialError`,
 `SerialHandler`. Everything else (`codec`, `serial::*`,
-`handler::*`) is reachable via path.
+ `server::*`) is reachable via path.
 
 ### 3. `src/main.rs` — stdio entry
 
@@ -101,7 +101,7 @@ more specific variant would carry more information for the LLM.
 - Base64 falls back to URL-safe-no-padding after standard base64
   fails. Two attempts on every decode is fine for the volumes
   involved but worth noting.
-- `Encoding::from_str` returns `CodecError`; in `handler.rs` callers
+- `Encoding::from_str` returns `CodecError`; in `server.rs` callers
   wrap that string into the tool error. Spot-check the
   `parse_encoding` helper there to verify the message flow.
 
@@ -122,7 +122,7 @@ more specific variant would carry more information for the LLM.
 - L214–352: `SerialConnection` — open, write, read (with optional
   timeout), flush_buffers, set_dtr_rts, send_break.
   - `read()` honours `Option<u64>` for timeout, returns
-    `SerialError::ReadTimeout`. The `wait_for` tool in handler.rs
+    `SerialError::ReadTimeout`. The `wait_for` tool in server.rs
     builds on this.
   - `send_break()` drops the mutex around the `tokio::time::sleep`
     so other ops can interleave.
@@ -149,7 +149,7 @@ more specific variant would carry more information for the LLM.
   during the break. Question: is that acceptable or should send_break
   hold the lock?
 
-### 8. `src/handler.rs` — the MCP surface (the big one)
+### 8. `src/server.rs` — the MCP surface (the big one)
 
 1342 lines. Worth budgeting 30 min for this file alone. Sections in
 order of appearance:
@@ -367,7 +367,7 @@ Likely candidates after you finish reading:
 - [ ] `src/error.rs`
 - [ ] `src/codec.rs`
 - [ ] `src/serial.rs` (config enums → SerialIo → SerialConnection → ConnectionManager → test_support)
-- [ ] `src/handler.rs` (args → results → tools → helpers → prompts → ServerHandler impl → resources)
+- [ ] `src/server.rs` (args → results → tools → helpers → prompts → ServerHandler impl → resources)
 - [ ] `tests/common/mod.rs`
 - [ ] `tests/http_integration.rs`
 - [ ] `tests/serial_pty.rs`
