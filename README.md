@@ -108,7 +108,7 @@ MCP `notifications/message` events.
 ## Commands
 
 ```bash
-cargo test                    # Full test suite (~62 tests)
+cargo test                    # Full test suite (~70 tests)
 cargo clippy --all-targets -- -D warnings   # Lint (zero warnings)
 cargo fmt --all -- --check    # Format check
 

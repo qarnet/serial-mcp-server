@@ -3,10 +3,14 @@
 ## Build / Test / Lint Commands
 
 ```bash
-# Full test suite (all 6 test layers, ~70 tests)
+# Full test suite (all test layers, ~70+ tests)
 cargo test
 
-# Run a single test by name
+# Run a single unit test by name
+cargo test --lib verify_all_tool_schemas
+cargo test --lib list_ports_has_output_schema
+
+# Run a single integration test by name
 cargo test --test http_integration list_tools_returns_all_eleven_tools
 cargo test --test serial_pty pty_wait_for_matches_real_serial_pattern
 

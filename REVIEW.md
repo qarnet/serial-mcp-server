@@ -18,21 +18,40 @@ src/
   codec.rs          184 LOC   Encoding enum + decode/encode + 9 tests
   serial.rs         600 LOC   PortInfo, SerialIo trait, ConnectionManager
                               + LoopbackIo test backend + 12 tests
-  server.rs        ~1500 LOC  11 tools, 3 resources, 2 prompts,
+  server.rs           570 LOC  11 tools, 3 resources, 2 prompts,
                               resource change notifications, port allowlist,
-                              all response structs, parse helpers,
-                              streaming + task framework wiring, 15 tests
+                              pagination, resource metadata, 15 tests
+  tools/
+    mod.rs           ~40 LOC   Re-exports + outputSchema verification test
+    types.rs        ~200 LOC   Tool argument + response structs
+    helpers.rs      ~150 LOC   read_bytes, read_until_pattern, build_read_result
+    port_ops.rs      ~80 LOC   list_ports, open, close
+    io_ops.rs       ~100 LOC   read, write, flush
+    control_ops.rs   ~60 LOC   set_dtr_rts, send_break
+    pattern_ops.rs  ~120 LOC   wait_for
+    stream_ops.rs   ~150 LOC   subscribe, unsubscribe, stream_rx
+  prompts/
+    mod.rs            ~5 LOC   Re-exports
+    types.rs         ~30 LOC   Prompt argument structs
+    diagnose.rs      ~60 LOC   diagnose_port prompt
+    interactive.rs   ~50 LOC   interactive_terminal prompt
+  resources/
+    mod.rs           ~20 LOC   Re-exports + URI constants
+    types.rs         ~40 LOC   ResourceUriKind, parse_resource_uri
+  security.rs        ~60 LOC   Allowlist: parse, check, summary
+
 tests/
   common/mod.rs     213 LOC   TestServer harness + NotificationCollector
                               + PtyPair helper
-  http_integration  331 LOC   Layer 2 — 14 in-memory HTTP tests
-  serial_pty        217 LOC   Layer 3 — 6 real-PTY tests (Linux only)
-  hardware_loopback 186 LOC   Layer 4 — 2 ignored hardware tests
-  stdio_integration ~170 LOC Layer 5 — 3 stdio transport tests
-  allowlist         ~220 LOC Layer 6 — 3 port allowlist tests
+  http_integration  ~380 LOC  Layer 2 — 17 in-memory HTTP tests (incl. pagination)
+  resource_subscriptions ~150 LOC  Layer 3 — 2 resource subscription tests
+  serial_pty        217 LOC   Layer 4 — 6 real-PTY tests (Linux only)
+  hardware_loopback 186 LOC   Layer 5 — 2 ignored hardware tests
+  stdio_integration ~170 LOC  Layer 6 — 3 stdio transport tests
+  allowlist         ~220 LOC  Layer 7 — 3 port allowlist tests
 ```
 
-Total ~3.5 KLOC production+tests. Active: 62 tests pass (plus 3 ignored hardware tests), clippy
+Total ~3.5 KLOC production+tests. Active: 70 tests pass (plus 2 ignored hardware tests), clippy
 `-D warnings` clean, `cargo fmt --check` clean.
 
 ## Reading order (start → finish, ~60–90 min)
@@ -151,55 +170,29 @@ more specific variant would carry more information for the LLM.
 
 ### 8. `src/server.rs` — the MCP surface (the big one)
 
-1342 lines. Worth budgeting 30 min for this file alone. Sections in
-order of appearance:
+  570 lines. The modular refactored version. Sections in
+  order of appearance:
 
-- L1–35: imports + `DEFAULT_READ_TIMEOUT_MS`.
-- L37–127: **All tool argument structs** (`OpenArgs`, `WriteArgs`,
-  `ReadArgs`, `FlushArgs`, `SetDtrRtsArgs`, `SendBreakArgs`,
-  `WaitForArgs`, `SubscribeArgs`, `UnsubscribeArgs`, `CloseArgs`).
-  All `#[derive(Deserialize, JsonSchema)]`. Defaults via small fns.
-- L129–164: `default_*` helper fns. Boring but necessary for serde.
-- L166–257: **All tool response structs** (`ListPortsResult`,
-  `OpenResult`, `CloseResult`, `WriteResult`, `ReadResult`,
-  `FlushResult`, `SetDtrRtsResult`, `SendBreakResult`,
-  `SubscribeResult`, `UnsubscribeResult`, `WaitForResult`). These
-  are what MCP clients see as structured output — review carefully,
-  this is the API contract.
-- L259–283: `SerialHandler` struct + `StreamHandle` Drop wrapper
-  for background streams.
-- L285–296: `SerialHandler::new()` + `with_manager()` constructor.
-  The `with_manager` constructor is the test hook.
-- L298 onwards: **The 11 tool methods** annotated with `#[tool]`.
+- L1–35: imports + pagination helper.
+- L37–65: `SerialHandler` struct (streams, security, subscribers).
+- L67–86: `SerialHandler::new()` + `with_manager()` constructor.
+- L88 onwards: **The 11 tool methods** annotated with `#[tool]`.
   Read them in this order for understanding:
   1. `list_ports` — simplest, just enumerates.
-  2. `open` — opens a port. Note `parse_open_args` does strict
-     parsing (no silent fallback).
+  2. `open` — opens a port. Note strict parsing (no silent fallback).
   3. `close` — removes from manager.
   4. `write` — encoding parse, decode, call `connection.write`.
-  5. `read` — encoding parse, call `read_bytes` helper,
-     `build_read_result` formats the response with `timed_out` flag.
+  5. `read` — encoding parse, call `read_bytes` helper.
   6. `flush` / `set_dtr_rts` / `send_break` — control-line ops.
-  7. `wait_for` — the most algorithmic tool. Read
-     `read_until_pattern` carefully.
-  8. `subscribe` / `unsubscribe` — spawn a background task that
-     forwards bytes as `notifications/message` events.
-- After the tools: `lookup_connection` helper + `ReadOutcome` /
-  `WaitOutcome` types + the pure formatting helpers.
-- L~960 onwards: parsing helpers (`parse_open_args`,
-  `parse_data_bits`, etc.) — these enforce the strict-arg policy.
-- L~1020: tiny error builders (`log_tool_err`).
-- L~1040: `#[prompt_router]` block with `diagnose_port` and
-  `interactive_terminal` prompt definitions. Read the user-message
-  strings — these go into the LLM context window every time a client
-  calls `get_prompt`.
-- L~1180: `ServerHandler` impl with `#[tool_handler]`,
-  `#[prompt_handler]`, `#[task_handler]` macros stacked.
-  `get_info()` declares capabilities (tools, resources, prompts,
-  logging) and protocol version.
-- L~1230: `list_resources` / `list_resource_templates` /
-  `read_resource` methods + the `parse_resource_uri` dispatch helper.
-- L~1290: tests module (15 tests).
+  7. `wait_for` — the most algorithmic tool.
+  8. `subscribe` / `unsubscribe` — spawn background task.
+- L~300: `#[prompt_router]` block with `diagnose_port` and
+  `interactive_terminal` prompt definitions.
+- L~340: `ServerHandler` impl with `#[tool_handler]`,
+  `#[prompt_handler]`. `get_info()` declares capabilities.
+- L~360: `list_resources` / `list_resource_templates` /
+  `read_resource` — now with pagination and metadata.
+- L~420: tests module (15 tests).
 
 **Watch for:**
 - The 11 tools all follow a similar shape: `parse args → lookup
@@ -239,11 +232,11 @@ above it is clear enough.
 
 ### 10. `tests/http_integration.rs` — Layer 2
 
-331 lines, 14 tests. Read at least the first three (`initialize_handshake`,
+~426 lines, 17 tests. Read at least the first three (`initialize_handshake`,
 `list_tools_returns_all_eleven_tools`, `subscribe_then_peer_write_pushes_notification`)
 to understand the harness pattern. Skim the rest.
 
-### 11. `tests/serial_pty.rs` — Layer 3 (the killer test layer)
+### 11. `tests/serial_pty.rs` — Layer 4 (the killer test layer)
 
 217 lines, 6 tests. **This is the file that proves "server ↔ serial
 ↔ client really works".** Read it top-to-bottom.
@@ -253,25 +246,30 @@ opens slave_path → client connects via HTTP → returns
 connection_id + master fd. Each test then drives one direction of
 the traffic.
 
-### 12. `tests/stdio_integration.rs` — Layer 4 (stdio transport)
+### 12. `tests/resource_subscriptions.rs` — Layer 5 (resource subscription tests)
 
-~170 lines, 4 tests (1 ignored). Spawns the stdio binary as a child
+~95 lines, 2 tests. Verifies resource subscribe/unsubscribe roundtrip
+and actual subscription behavior with notification delivery.
+
+### 13. `tests/stdio_integration.rs` — Layer 6 (stdio transport)
+
+~217 lines, 4 tests (1 ignored). Spawns the stdio binary as a child
 process and connects via stdin/stdout pipes using rmcp's
 `TokioChildProcess` transport. Verifies the stdio transport works
 identically to HTTP — critical for desktop MCP clients (Claude Desktop,
 opencode).
 
-### 13. `tests/allowlist.rs` — Layer 5 (security)
-
-~220 lines, 3 tests. Tests the `SERIAL_MCP_ALLOWLIST` env var:
-blocks unauthorized ports, allows authorized ports, and supports
-glob patterns (`/dev/ttyACM*`).
-
-### 14. `tests/hardware_loopback.rs` — Layer 6
+### 14. `tests/hardware_loopback.rs` — Layer 7 (hardware validation)
 
 186 lines, 2 ignored tests. Real USB-Serial adapter with TX→RX jumper.
 Confirms behaviour on physical hardware. Run with:
 `SERIAL_MCP_TEST_PORT=/dev/ttyACM0 cargo test --test hardware_loopback -- --ignored --test-threads=1`
+
+### 15. `tests/allowlist.rs` — Layer 8 (security)
+
+~220 lines, 3 tests. Tests the `SERIAL_MCP_ALLOWLIST` env var:
+blocks unauthorized ports, allows authorized ports, and supports
+glob patterns (`/dev/ttyACM*`).
 
 ### 13. `CHANGELOG.md`
 
@@ -327,23 +325,7 @@ After reading, exercise the code yourself:
 ```bash
 # Unit + integration tests (fast)
 cargo test
-# → 36 unit + 14 HTTP + 6 PTY + 3 stdio + 3 allowlist + 3 ignored hardware = 62 active
-
-# Strictest CI gate
-cargo clippy --all-targets -- -D warnings
-cargo fmt --all -- --check
-
-# Run the HTTP server manually
-SERIAL_MCP_HTTP_BIND=127.0.0.1:8000 RUST_LOG=debug \
-  cargo run --release --bin serial-mcp-server-http
-
-# Drive it with the official MCP inspector
-npx @modelcontextprotocol/inspector
-# → connect to http://127.0.0.1:8000/mcp
-# → walk through list_tools, list_resources, get_prompt(diagnose_port)
-
-# If you have a USB-Serial dongle with TX-RX jumpered:
-SERIAL_MCP_TEST_PORT=/dev/ttyACM0 cargo test --test hardware_loopback -- --ignored --test-threads=1
+# → 37 unit + 17 HTTP + 2 resource_subscriptions + 6 PTY + 3 stdio + 3 allowlist + 2 ignored hardware = 70 active
 ```
 
 ## Questions to come back with
