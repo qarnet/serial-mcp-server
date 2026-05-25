@@ -23,7 +23,6 @@ use rmcp::{
 
 use tracing::{debug, info};
 
-use crate::codec;
 use crate::security::SecurityManager;
 use crate::serial::{ConnectionManager, ConnectionSummary, PortInfo, SerialConnection};
 
@@ -31,7 +30,7 @@ use crate::prompts::types::*;
 use crate::prompts::{diagnose, interactive};
 use crate::tools::helpers::*;
 use crate::tools::types::*;
-use crate::tools::{control_ops, io_ops, port_ops};
+use crate::tools::{control_ops, io_ops, pattern_ops, port_ops};
 
 // ---- Handler ---------------------------------------------------------------
 
@@ -234,34 +233,7 @@ impl SerialHandler {
         &self,
         Parameters(args): Parameters<WaitForArgs>,
     ) -> Result<Json<WaitForResult>, String> {
-        debug!(
-            "wait_for {} pattern_encoding={} timeout={}ms max_bytes={}",
-            args.connection_id, args.pattern_encoding, args.timeout_ms, args.max_bytes
-        );
-        let pattern_encoding = parse_encoding(&args.pattern_encoding)?;
-        let response_encoding = parse_encoding(&args.response_encoding)?;
-        let pattern = codec::decode(pattern_encoding, &args.pattern)
-            .map_err(|e| format!("Pattern decoding failed - {e}"))?;
-        if pattern.is_empty() {
-            return Err("Pattern must not be empty".into());
-        }
-
-        let connection = self.lookup_connection(&args.connection_id).await?;
-        let outcome =
-            read_until_pattern(&connection, &pattern, args.timeout_ms, args.max_bytes).await?;
-        let bytes_read = outcome.bytes.len();
-        let data = codec::encode(response_encoding, &outcome.bytes)
-            .map_err(|e| format!("Response encoding failed - {e}"))?;
-        Ok(Json(WaitForResult {
-            connection_id: args.connection_id,
-            matched: outcome.match_index.is_some(),
-            timed_out: outcome.timed_out,
-            data,
-            bytes_read,
-            match_index: outcome.match_index,
-            timeout_ms: args.timeout_ms,
-            response_encoding: response_encoding.to_string(),
-        }))
+        pattern_ops::wait_for(&self.connections, args).await
     }
 }
 
