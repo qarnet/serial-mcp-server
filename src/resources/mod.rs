@@ -27,3 +27,41 @@ pub fn parse_resource_uri(uri: &str) -> ResourceUriKind {
         },
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resource_uri_known_targets() {
+        assert_eq!(parse_resource_uri("serial://ports"), ResourceUriKind::Ports);
+        assert_eq!(
+            parse_resource_uri("serial://connections"),
+            ResourceUriKind::ConnectionsList
+        );
+        assert_eq!(
+            parse_resource_uri("serial://connections/abc-123"),
+            ResourceUriKind::ConnectionDetail("abc-123".into())
+        );
+    }
+
+    #[test]
+    fn resource_uri_unknown_targets() {
+        assert_eq!(
+            parse_resource_uri("serial://other"),
+            ResourceUriKind::Unknown
+        );
+        assert_eq!(
+            parse_resource_uri("serial://connections/"),
+            ResourceUriKind::Unknown
+        );
+        assert_eq!(
+            parse_resource_uri("serial://connections/abc/extra"),
+            ResourceUriKind::Unknown
+        );
+        assert_eq!(
+            parse_resource_uri("https://example.com"),
+            ResourceUriKind::Unknown
+        );
+    }
+}
