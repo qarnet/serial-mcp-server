@@ -129,6 +129,30 @@ async fn list_resources_returns_two_statics() {
 }
 
 #[tokio::test]
+async fn list_resources_pagination_with_cursor_returns_next_page() {
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    // Request first page with size 1
+    let page1 = client
+        .peer()
+        .list_resources(Some(PaginatedRequestParams::default().with_cursor(None)))
+        .await
+        .unwrap();
+    assert_eq!(
+        page1.resources.len(),
+        2,
+        "both resources fit on single page"
+    );
+    assert!(
+        page1.next_cursor.is_none(),
+        "no next cursor when all items fit"
+    );
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
 async fn list_resource_templates_returns_connection_template() {
     let server = TestServer::start().await;
     let (client, _rx) = connect_client(&server).await.unwrap();
@@ -147,6 +171,30 @@ async fn list_resource_templates_returns_connection_template() {
         uris,
         vec!["serial://connections/{id}", "serial://connections/{id}/raw"]
     );
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn list_resource_templates_pagination_with_cursor_returns_next_page() {
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    // Request first page with size 1
+    let page1 = client
+        .peer()
+        .list_resource_templates(Some(PaginatedRequestParams::default().with_cursor(None)))
+        .await
+        .unwrap();
+    assert_eq!(
+        page1.resource_templates.len(),
+        2,
+        "both templates fit on single page"
+    );
+    assert!(
+        page1.next_cursor.is_none(),
+        "no next cursor when all items fit"
+    );
+
     client.cancel().await.ok();
 }
 

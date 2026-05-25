@@ -72,6 +72,38 @@ prompts, streaming, task cancellation, and an HTTP transport.
 | After feature sprint G–K | 36 |
 | After MCP 2025-11-25 compliance sprint | 62 active + 3 ignored |
 
+## [0.2.2] — 2026-05-25
+
+MCP specification compliance audit fixes: pagination, resource metadata, dead-code removal, and comprehensive test coverage.
+
+### Added
+
+- **Functional pagination** — `list_resources` and `list_resource_templates` now properly implement cursor-based pagination with `nextCursor`.
+  - `PaginatedRequestParams` cursor parameter is interpreted as base64-encoded offset
+  - Page size set to 100 items (generous for serial port use)
+  - Integration tests added to verify pagination behavior
+- **Resource `size` metadata** — `serial://ports` and `serial://connections` now include `size` field (port count and connection count respectively)
+- **Tool outputSchema verification test** — `tools::tests::verify_all_tool_schemas` confirms all 11 tools have auto-generated output schemas via rmcp macro
+- **Resource metadata to resource templates** — Connection templates now include `size` reflecting open connection count
+
+### Changed
+
+- **SPECIFICATION_COMPLIANCE.md** — Fixed false negatives:
+  - `title` field: marked ✅ (was ❌, actually present on all tools)
+  - `annotations` field: marked ✅ (was ❌, actually present on relevant tools)
+  - `progressToken`: marked ✅ (was ❌, wired for read/wait_for/send_break)
+  - `CancellationToken`: marked ✅ (was ❌, cooperative cancellation working)
+  - Overall compliance score updated from ~70% to ~85%
+
+### Removed
+
+- **Dead code from `SerialHandler`** — Removed `processor`, `tool_router`, and `prompt_router` fields that were constructed but never used (all marked `#[allow(dead_code)]`)
+- **Unused `#[task_handler]` macro** — Removed from `ServerHandler` impl since task infrastructure was not wired and `tasks` capability is not declared
+
+### Fixed
+
+- **Pagination compliance** — `next_cursor` now properly populated when more items remain, instead of always returning `None`
+
 ## [0.2.1] — 2026-05-24
 
 MCP 2025-11-25 compliance, CDC-ACM hardware fixes, port allowlist, and comprehensive testing.

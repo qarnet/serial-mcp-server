@@ -443,6 +443,11 @@ impl ConnectionManager {
             .ok_or_else(|| SerialError::InvalidConnection(id.to_string()))
     }
 
+    /// Number of currently open connections.
+    pub async fn count(&self) -> usize {
+        self.connections.lock().await.len()
+    }
+
     /// Lightweight snapshot of all currently-open connections. Cheap because
     /// it only clones the id + port pair, not the underlying IO.
     pub async fn list_open(&self) -> Vec<ConnectionSummary> {

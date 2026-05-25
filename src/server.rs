@@ -9,16 +9,9 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use rmcp::{
-    handler::server::{
-        router::{prompt::PromptRouter, tool::ToolRouter},
-        wrapper::Parameters,
-    },
-    model::*,
-    prompt, prompt_handler, prompt_router,
-    service::RequestContext,
-    task_handler,
-    task_manager::OperationProcessor,
-    tool, tool_handler, tool_router, ErrorData as McpError, Json, RoleServer, ServerHandler,
+    handler::server::wrapper::Parameters, model::*, prompt, prompt_handler, prompt_router,
+    service::RequestContext, tool, tool_handler, tool_router, ErrorData as McpError, Json,
+    RoleServer, ServerHandler,
 };
 
 use tracing::{debug, info};
@@ -31,25 +24,43 @@ use crate::prompts::{diagnose, interactive};
 use crate::tools::types::*;
 use crate::tools::{control_ops, io_ops, pattern_ops, port_ops, stream_ops};
 
+/// Helper for cursor-based pagination over a vector of items.
+///
+/// `cursor` is interpreted as a base64-encoded UTF-8 string containing an offset
+/// number (e.g. "0", "1").  Returns the sliced items and an optional next
+/// cursor when more items remain.
+fn paginate<T: Clone>(
+    all: &[T],
+    cursor: Option<String>,
+    page_size: usize,
+) -> (Vec<T>, Option<String>) {
+    let offset = cursor
+        .as_deref()
+        .and_then(|c| base64::engine::general_purpose::STANDARD.decode(c).ok())
+        .and_then(|b| String::from_utf8(b).ok())
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0);
+
+    let end = (offset + page_size).min(all.len());
+    let items = all[offset..end].to_vec();
+
+    let next_cursor = if end < all.len() {
+        let next = base64::engine::general_purpose::STANDARD.encode(end.to_string().as_bytes());
+        Some(next)
+    } else {
+        None
+    };
+
+    (items, next_cursor)
+}
+
 // ---- Handler ---------------------------------------------------------------
 
 #[derive(Clone)]
 pub struct SerialHandler {
     pub(crate) connections: Arc<ConnectionManager>,
-    /// Per-connection background RX-streaming tasks, indexed by connection id.
-    /// Dropping a handle aborts the task.
     streams: Arc<tokio::sync::Mutex<HashMap<String, stream_ops::StreamHandle>>>,
-    /// MCP task manager for opt-in long-running tool invocations
-    /// (read, wait_for, send_break). Clients can submit those tools as
-    /// tasks and cancel them via the standard MCP tasks/cancel request.
-    #[allow(dead_code)]
-    processor: Arc<tokio::sync::Mutex<OperationProcessor>>,
-    #[allow(dead_code)]
-    tool_router: ToolRouter<SerialHandler>,
-    #[allow(dead_code)]
-    prompt_router: PromptRouter<SerialHandler>,
     security: SecurityManager,
-    /// Active resource subscribers by URI (simple reference count).
     subscribers: Arc<tokio::sync::Mutex<HashMap<String, usize>>>,
 }
 
@@ -69,9 +80,6 @@ impl SerialHandler {
         Self {
             connections,
             streams: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            processor: Arc::new(tokio::sync::Mutex::new(OperationProcessor::new())),
-            tool_router: Self::tool_router(),
-            prompt_router: Self::prompt_router(),
             security,
             subscribers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
@@ -317,7 +325,6 @@ impl SerialHandler {
 
 #[tool_handler]
 #[prompt_handler]
-#[task_handler]
 impl ServerHandler for SerialHandler {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(
@@ -354,59 +361,76 @@ impl ServerHandler for SerialHandler {
 
     async fn list_resources(
         &self,
-        _request: Option<PaginatedRequestParams>,
+        request: Option<PaginatedRequestParams>,
         _ctx: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
+        const PAGE_SIZE: usize = 100;
+
+        let port_count = PortInfo::list_available()
+            .map(|v| v.len() as u32)
+            .unwrap_or(0);
+        let conn_count = self.connections.count().await as u32;
+
+        let all = vec![
+            RawResource::new(URI_PORTS, "Available serial ports")
+                .with_description("JSON list of serial ports the OS currently exposes.".to_string())
+                .with_mime_type("application/json".to_string())
+                .with_size(port_count)
+                .with_priority(0.9)
+                .with_audience(vec![Role::User, Role::Assistant]),
+            RawResource::new(URI_CONNECTIONS, "Open serial connections")
+                .with_description(
+                    "JSON list of serial connections currently held open by this server."
+                        .to_string(),
+                )
+                .with_mime_type("application/json".to_string())
+                .with_size(conn_count)
+                .with_priority(0.8)
+                .with_audience(vec![Role::User, Role::Assistant]),
+        ];
+        let (resources, next_cursor) = paginate(&all, request.and_then(|r| r.cursor), PAGE_SIZE);
         Ok(ListResourcesResult {
-            resources: vec![
-                RawResource::new(URI_PORTS, "Available serial ports")
-                    .with_description(
-                        "JSON list of serial ports the OS currently exposes.".to_string(),
-                    )
-                    .with_mime_type("application/json".to_string())
-                    .no_annotation(),
-                RawResource::new(URI_CONNECTIONS, "Open serial connections")
-                    .with_description(
-                        "JSON list of serial connections currently held open by this server."
-                            .to_string(),
-                    )
-                    .with_mime_type("application/json".to_string())
-                    .no_annotation(),
-            ],
-            next_cursor: None,
+            resources,
+            next_cursor,
             meta: None,
         })
     }
 
     async fn list_resource_templates(
         &self,
-        _request: Option<PaginatedRequestParams>,
+        request: Option<PaginatedRequestParams>,
         _ctx: RequestContext<RoleServer>,
     ) -> Result<ListResourceTemplatesResult, McpError> {
+        const PAGE_SIZE: usize = 100;
+        let all = vec![
+            RawResourceTemplate::new(
+                URI_CONNECTION_TEMPLATE,
+                "Open serial connection by id",
+            )
+            .with_description(
+                "Per-connection state. Substitute {id} with a connection_id returned by the open tool."
+                    .to_string(),
+            )
+            .with_mime_type("application/json".to_string())
+            .with_priority(0.7)
+            .with_audience(vec![Role::User, Role::Assistant]),
+            RawResourceTemplate::new(
+                URI_CONNECTION_RAW_TEMPLATE,
+                "Raw binary data from a serial connection",
+            )
+            .with_description(
+                "Base64-encoded bytes recently read from the connection. Substitute {id} with a connection_id."
+                    .to_string(),
+            )
+            .with_mime_type("application/octet-stream".to_string())
+            .with_priority(0.6)
+            .with_audience(vec![Role::User, Role::Assistant]),
+        ];
+        let (resource_templates, next_cursor) =
+            paginate(&all, request.and_then(|r| r.cursor), PAGE_SIZE);
         Ok(ListResourceTemplatesResult {
-            resource_templates: vec![
-                RawResourceTemplate::new(
-                    URI_CONNECTION_TEMPLATE,
-                    "Open serial connection by id",
-                )
-                .with_description(
-                    "Per-connection state. Substitute {id} with a connection_id returned by the open tool."
-                        .to_string(),
-                )
-                .with_mime_type("application/json".to_string())
-                .no_annotation(),
-                RawResourceTemplate::new(
-                    URI_CONNECTION_RAW_TEMPLATE,
-                    "Raw binary data from a serial connection",
-                )
-                .with_description(
-                    "Base64-encoded bytes recently read from the connection. Substitute {id} with a connection_id."
-                        .to_string(),
-                )
-                .with_mime_type("application/octet-stream".to_string())
-                .no_annotation(),
-            ],
-            next_cursor: None,
+            resource_templates,
+            next_cursor,
             meta: None,
         })
     }
