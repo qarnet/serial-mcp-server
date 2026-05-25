@@ -30,6 +30,7 @@ use crate::serial::{ConnectionManager, ConnectionSummary, PortInfo, SerialConnec
 use crate::prompts::types::*;
 use crate::prompts::{diagnose, interactive};
 use crate::tools::helpers::*;
+use crate::tools::port_ops;
 use crate::tools::types::*;
 
 // ---- Handler ---------------------------------------------------------------
@@ -91,14 +92,7 @@ impl SerialHandler {
 
     #[tool(description = "List all available serial ports on the system")]
     async fn list_ports(&self) -> Result<Json<ListPortsResult>, String> {
-        debug!("Listing serial ports");
-        let ports = PortInfo::list_available()
-            .map_err(|e| log_tool_err("list_ports", "Failed to list ports", e))?;
-        info!("Found {} serial ports", ports.len());
-        Ok(Json(ListPortsResult {
-            count: ports.len(),
-            ports,
-        }))
+        port_ops::list_ports().await
     }
 
     #[tool(description = "Open a serial port connection with specified configuration")]
@@ -107,54 +101,14 @@ impl SerialHandler {
         Parameters(args): Parameters<OpenArgs>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<Json<OpenResult>, String> {
-        let config = parse_open_args(args)?;
-        let port = config.port.clone();
-        let baud_rate = config.baud_rate;
-        debug!("Opening {} @ {}", port, baud_rate);
-
-        // Check allowlist
-        if !self.security.is_port_allowed(&port) {
-            return Err(format!(
-                "Port '{}' is not in the allowlist. Allowed patterns: {}",
-                port,
-                self.security.allowlist_summary()
-            ));
-        }
-
-        let connection_id = self
-            .connections
-            .open(config)
-            .await
-            .map_err(|e| log_tool_err("open", &format!("Failed to open port {port}"), e))?;
-        info!("Opened connection {} -> {}", connection_id, port);
-
-        // Notify clients that the resource list has changed
-        if let Err(e) = ctx.peer.notify_resource_list_changed().await {
-            debug!("Failed to notify resource list changed: {}", e);
-        }
-
-        // Notify subscribers to the specific connection resource
-        let conn_uri = format!("{URI_CONNECTION_PREFIX}{connection_id}");
-        let subs = self.subscribers.lock().await;
-        let should_notify = subs.get(&conn_uri).is_some_and(|count| *count > 0);
-        drop(subs);
-        if should_notify {
-            if let Err(e) = ctx
-                .peer
-                .notify_resource_updated(rmcp::model::ResourceUpdatedNotificationParam::new(
-                    conn_uri,
-                ))
-                .await
-            {
-                debug!("Failed to notify resource updated: {}", e);
-            }
-        }
-
-        Ok(Json(OpenResult {
-            connection_id,
-            port,
-            baud_rate,
-        }))
+        port_ops::open(
+            &self.connections,
+            &self.security,
+            &self.subscribers,
+            args,
+            ctx,
+        )
+        .await
     }
 
     #[tool(description = "Close an open serial port connection")]
@@ -163,44 +117,7 @@ impl SerialHandler {
         Parameters(args): Parameters<CloseArgs>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<Json<CloseResult>, String> {
-        debug!("Closing {}", args.connection_id);
-        self.connections
-            .close(&args.connection_id)
-            .await
-            .map_err(|e| {
-                log_tool_err(
-                    "close",
-                    &format!("Failed to close connection {}", args.connection_id),
-                    e,
-                )
-            })?;
-        info!("Closed connection {}", args.connection_id);
-
-        // Notify clients that the resource list has changed
-        if let Err(e) = ctx.peer.notify_resource_list_changed().await {
-            debug!("Failed to notify resource list changed: {}", e);
-        }
-
-        // Notify subscribers to the specific connection resource
-        let conn_uri = format!("{URI_CONNECTION_PREFIX}{}", args.connection_id);
-        let subs = self.subscribers.lock().await;
-        let should_notify = subs.get(&conn_uri).is_some_and(|count| *count > 0);
-        drop(subs);
-        if should_notify {
-            if let Err(e) = ctx
-                .peer
-                .notify_resource_updated(rmcp::model::ResourceUpdatedNotificationParam::new(
-                    conn_uri,
-                ))
-                .await
-            {
-                debug!("Failed to notify resource updated: {}", e);
-            }
-        }
-
-        Ok(Json(CloseResult {
-            connection_id: args.connection_id,
-        }))
+        port_ops::close(&self.connections, &self.subscribers, args, ctx).await
     }
 
     #[tool(description = "Write data to a serial port connection")]
@@ -726,7 +643,7 @@ impl ServerHandler for SerialHandler {
 
 use crate::resources::{
     parse_resource_uri, ConnectionsResource, ResourceUriKind, URI_CONNECTIONS,
-    URI_CONNECTION_PREFIX, URI_CONNECTION_RAW_TEMPLATE, URI_CONNECTION_TEMPLATE, URI_PORTS,
+    URI_CONNECTION_RAW_TEMPLATE, URI_CONNECTION_TEMPLATE, URI_PORTS,
 };
 
 #[cfg(test)]
