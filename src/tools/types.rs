@@ -75,6 +75,9 @@ pub struct SendBreakArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SubscribeArgs {
     pub connection_id: String,
+    #[serde(default)]
+    #[schemars(schema_with = "crate::schema_helpers::option_timeout_ms_schema")]
+    pub timeout_ms: Option<u64>,
     #[serde(default = "default_encoding")]
     pub encoding: String,
     #[serde(default = "default_subscribe_chunk_bytes")]
@@ -180,6 +183,19 @@ pub struct SubscribeResult {
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub poll_interval_ms: u64,
     pub replaced_previous: bool,
+    /// Present only when timeout_ms was set. Contains all data accumulated
+    /// during the subscription window.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub bytes_read: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub elapsed_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

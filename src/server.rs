@@ -222,20 +222,24 @@ impl SerialHandler {
     }
 
     #[tool(
-        description = "Subscribe to a connection: a background task reads bytes in chunks and forwards them to the client as MCP `notifications/message` events with logger=\"serial:<connection_id>\". Replaces any prior subscription on the same connection. Stop with unsubscribe or by closing the connection.",
+        description = "Subscribe to a connection: when timeout_ms is set, blocks for that duration collecting data and returns it inline. When omitted, a background task reads bytes in chunks and forwards them to the client as MCP `notifications/message` events with logger=\"serial:<connection_id>\". Replaces any prior subscription on the same connection. Stop with unsubscribe or by closing the connection.",
         title = "Subscribe to RX Stream",
         annotations(
             destructive_hint = false,
             idempotent_hint = true,
             open_world_hint = false
-        )
+        ),
+        execution(task_support = "optional")
     )]
     async fn subscribe(
         &self,
+        meta: Meta,
+        ct: tokio_util::sync::CancellationToken,
+        peer: rmcp::Peer<RoleServer>,
         Parameters(args): Parameters<SubscribeArgs>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<Json<SubscribeResult>, String> {
-        stream_ops::subscribe(&self.connections, &self.streams, args, ctx).await
+        stream_ops::subscribe(&self.connections, &self.streams, args, meta, ct, peer, ctx).await
     }
 
     #[tool(

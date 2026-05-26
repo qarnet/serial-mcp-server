@@ -394,6 +394,84 @@ async fn subscribe_then_peer_write_pushes_notification() {
 }
 
 #[tokio::test]
+async fn subscribe_with_timeout_collects_and_returns_data() {
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, mut peer) = loopback_connection("loop-sub-blocking");
+    let connection_id = manager.insert(conn).await.unwrap();
+
+    let server = TestServer::start_with(manager).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    // Pre-fill the duplex buffer so data is immediately available when
+    // subscribe starts its poll loop.
+    peer.write_all(b"hello-blocking").await.unwrap();
+    peer.flush().await.unwrap();
+    drop(peer);
+
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "subscribe",
+            json!({
+                "connection_id": connection_id,
+                "timeout_ms": 500,
+                "encoding": "utf8",
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    let structured = result.structured_content.expect("structured content");
+    assert_eq!(structured["data"], json!("hello-blocking"));
+    assert!(structured.get("bytes_read").is_some());
+    assert!(structured.get("elapsed_ms").is_some());
+    assert_eq!(structured["timeout_ms"], json!(500));
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn subscribe_without_timeout_is_fire_and_forget() {
+    let manager = Arc::new(ConnectionManager::new());
+    let (conn, mut peer) = loopback_connection("loop-sub-ff");
+    let connection_id = manager.insert(conn).await.unwrap();
+
+    let server = TestServer::start_with(manager).await;
+    let (client, mut rx) = connect_client(&server).await.unwrap();
+
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "subscribe",
+            json!({
+                "connection_id": connection_id,
+                "poll_interval_ms": 50,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+
+    // Fire-and-forget: no data/bytes_read/elapsed_ms/timeout_ms in result
+    let structured = result.structured_content.expect("structured content");
+    assert!(structured.get("data").is_none());
+    assert!(structured.get("bytes_read").is_none());
+    assert!(structured.get("elapsed_ms").is_none());
+    assert!(structured.get("timeout_ms").is_none());
+
+    // Background stream still runs: write something and it arrives as notification
+    peer.write_all(b"post-subscribe").await.unwrap();
+    peer.flush().await.unwrap();
+    let event = next_notification(&mut rx, Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert_eq!(event.data["data"], json!("post-subscribe"));
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
 async fn subscribe_closed_from_other_session_stops_streaming_task() {
     let manager = Arc::new(ConnectionManager::new());
     let (conn, mut peer) = loopback_connection("loop-cross-session-close");
@@ -486,6 +564,10 @@ async fn validation_limits_return_tool_errors_over_http() {
         tool_request(
             "send_break",
             json!({ "connection_id": connection_id, "duration_ms": MAX_TIMEOUT_MS + 1 }),
+        ),
+        tool_request(
+            "subscribe",
+            json!({ "connection_id": connection_id, "timeout_ms": MAX_TIMEOUT_MS + 1 }),
         ),
     ];
 
