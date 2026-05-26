@@ -6,8 +6,9 @@ use tokio::time::{Duration, Instant};
 use tracing::{debug, info};
 
 use crate::serial::{ConnectionManager, SerialConnection};
-use crate::tools::helpers::log_tool_err;
-use crate::tools::helpers::lookup_connection;
+use crate::tools::helpers::{
+    clamp_timeout_or_err, log_tool_err, lookup_connection, MAX_TIMEOUT_MS,
+};
 use crate::tools::types::{SendBreakArgs, SendBreakResult, SetDtrRtsArgs, SetDtrRtsResult};
 
 pub async fn set_dtr_rts(
@@ -55,6 +56,7 @@ pub async fn send_break(
         args.connection_id, args.duration_ms
     );
 
+    clamp_timeout_or_err("send_break.duration_ms", args.duration_ms, MAX_TIMEOUT_MS)?;
     let connection = lookup_connection(connections, &args.connection_id).await?;
 
     struct BreakResetGuard {

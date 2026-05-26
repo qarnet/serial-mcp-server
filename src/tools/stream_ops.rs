@@ -5,7 +5,10 @@ use rmcp::{service::RequestContext, Json, RoleServer};
 use tracing::{debug, info};
 
 use crate::serial::ConnectionManager;
-use crate::tools::helpers::{lookup_connection, parse_encoding, stream_rx};
+use crate::tools::helpers::{
+    clamp_or_err, clamp_poll_interval_or_err, lookup_connection, parse_encoding, stream_rx,
+    MAX_STREAM_CHUNK_BYTES, MIN_POLL_INTERVAL_MS,
+};
 use crate::tools::types::{SubscribeArgs, SubscribeResult, UnsubscribeArgs, UnsubscribeResult};
 
 /// RAII wrapper around a streaming task. Aborts the task on drop.
@@ -34,9 +37,18 @@ pub async fn subscribe(
     let connection = lookup_connection(connections, &args.connection_id).await?;
     let peer = ctx.peer.clone();
 
+    let chunk_bytes = clamp_or_err(
+        "subscribe.max_chunk_bytes",
+        args.max_chunk_bytes,
+        MAX_STREAM_CHUNK_BYTES,
+    )?;
+    let poll_ms = clamp_poll_interval_or_err(
+        "subscribe.poll_interval_ms",
+        args.poll_interval_ms,
+        MIN_POLL_INTERVAL_MS,
+    )?;
+
     let id = args.connection_id.clone();
-    let chunk_bytes = args.max_chunk_bytes;
-    let poll_ms = args.poll_interval_ms;
     let join = tokio::spawn(stream_rx(peer, connection, encoding, chunk_bytes, poll_ms));
 
     let mut streams = streams.lock().await;

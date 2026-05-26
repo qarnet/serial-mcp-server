@@ -39,9 +39,10 @@ fn paginate<T: Clone>(
         .and_then(|c| base64::engine::general_purpose::STANDARD.decode(c).ok())
         .and_then(|b| String::from_utf8(b).ok())
         .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(0);
+        .unwrap_or(0)
+        .min(all.len());
 
-    let end = (offset + page_size).min(all.len());
+    let end = offset.saturating_add(page_size).min(all.len());
     let items = all[offset..end].to_vec();
 
     let next_cursor = if end < all.len() {
@@ -128,6 +129,8 @@ impl SerialHandler {
     ) -> Result<Json<CloseResult>, String> {
         let connection_id = args.connection_id.clone();
         let result = port_ops::close(&self.connections, args).await?;
+        // Abort any active RX subscription tied to this connection.
+        self.streams.lock().await.remove(&connection_id);
         self.notify_resource_changed(&connection_id, &ctx).await;
         Ok(result)
     }
@@ -597,5 +600,32 @@ mod tests {
         assert!(router.has_route("diagnose_port"));
         assert!(router.has_route("interactive_terminal"));
         assert_eq!(router.list_all().len(), 2);
+    }
+
+    #[test]
+    fn paginate_handles_offset_past_end_without_panic() {
+        let items: Vec<i32> = vec![1, 2, 3, 4, 5];
+
+        // Normal case: offset 0
+        let (page, next) = paginate(&items, None, 2);
+        assert_eq!(page, vec![1, 2]);
+        assert!(next.is_some());
+
+        // Offset at end of items
+        let cursor = base64::engine::general_purpose::STANDARD.encode("5".as_bytes());
+        let (page, next) = paginate(&items, Some(cursor), 2);
+        assert_eq!(page, vec![] as Vec<i32>);
+        assert!(next.is_none());
+
+        // Offset past end (would have panicked before fix)
+        let cursor = base64::engine::general_purpose::STANDARD.encode("999".as_bytes());
+        let (page, next) = paginate(&items, Some(cursor), 2);
+        assert_eq!(page, vec![] as Vec<i32>);
+        assert!(next.is_none());
+
+        // Offset at max usize (would have overflowed before fix)
+        let cursor = base64::engine::general_purpose::STANDARD.encode(usize::MAX.to_string());
+        let (page, _next) = paginate(&items, Some(cursor), usize::MAX);
+        assert_eq!(page, vec![] as Vec<i32>);
     }
 }

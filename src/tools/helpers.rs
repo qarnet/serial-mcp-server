@@ -19,6 +19,38 @@ use crate::tools::types::*;
 
 pub(crate) const DEFAULT_READ_TIMEOUT_MS: u64 = 1000;
 
+// Input validation limits
+pub const MAX_READ_BYTES: usize = 1024 * 1024; // 1 MiB
+pub const MAX_WAIT_BYTES: usize = 1024 * 1024; // 1 MiB
+pub const MAX_STREAM_CHUNK_BYTES: usize = 64 * 1024; // 64 KiB
+pub const MAX_TIMEOUT_MS: u64 = 5 * 60 * 1000; // 5 min
+pub const MIN_POLL_INTERVAL_MS: u64 = 10;
+pub const MAX_WRITE_BYTES: usize = 1024 * 1024; // 1 MiB
+
+pub fn clamp_or_err(name: &str, value: usize, max: usize) -> Result<usize, String> {
+    if value > max {
+        Err(format!("{name}={value} exceeds maximum {max}"))
+    } else {
+        Ok(value)
+    }
+}
+
+pub fn clamp_timeout_or_err(name: &str, value: u64, max: u64) -> Result<u64, String> {
+    if value > max {
+        Err(format!("{name}={value}ms exceeds maximum {max}ms"))
+    } else {
+        Ok(value)
+    }
+}
+
+pub fn clamp_poll_interval_or_err(name: &str, value: u64, min: u64) -> Result<u64, String> {
+    if value < min {
+        Err(format!("{name}={value}ms is below minimum {min}ms"))
+    } else {
+        Ok(value)
+    }
+}
+
 // ------------------------------------------------------------------
 // Connection lookup
 // ------------------------------------------------------------------
@@ -559,5 +591,27 @@ mod tests {
         assert!(!outcome.timed_out);
         assert!(outcome.match_index.is_none());
         assert_eq!(outcome.bytes.len(), 256);
+    }
+
+    #[test]
+    fn clamp_or_err_rejects_oversized_values() {
+        assert!(clamp_or_err("test.max_bytes", 1024 * 1024, MAX_READ_BYTES).is_ok());
+        assert!(clamp_or_err("test.max_bytes", 1024 * 1024 + 1, MAX_READ_BYTES).is_err());
+        assert!(clamp_or_err("test.max_bytes", usize::MAX, MAX_WRITE_BYTES).is_err());
+    }
+
+    #[test]
+    fn clamp_timeout_or_err_rejects_oversized_timeout() {
+        assert!(clamp_timeout_or_err("test.timeout_ms", 1000, MAX_TIMEOUT_MS).is_ok());
+        assert!(
+            clamp_timeout_or_err("test.timeout_ms", MAX_TIMEOUT_MS + 1, MAX_TIMEOUT_MS).is_err()
+        );
+    }
+
+    #[test]
+    fn clamp_poll_interval_or_err_rejects_undersized_interval() {
+        assert!(clamp_poll_interval_or_err("test.poll_ms", 10, MIN_POLL_INTERVAL_MS).is_ok());
+        assert!(clamp_poll_interval_or_err("test.poll_ms", 9, MIN_POLL_INTERVAL_MS).is_err());
+        assert!(clamp_poll_interval_or_err("test.poll_ms", 0, MIN_POLL_INTERVAL_MS).is_err());
     }
 }

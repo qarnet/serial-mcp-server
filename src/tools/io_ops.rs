@@ -6,7 +6,8 @@ use tracing::{debug, info};
 use crate::codec::{self, Encoding};
 use crate::serial::ConnectionManager;
 use crate::tools::helpers::{
-    build_read_result, log_tool_err, lookup_connection, parse_encoding, read_bytes,
+    build_read_result, clamp_or_err, clamp_timeout_or_err, log_tool_err, lookup_connection,
+    parse_encoding, read_bytes, MAX_READ_BYTES, MAX_TIMEOUT_MS, MAX_WRITE_BYTES,
 };
 use crate::tools::types::{FlushArgs, FlushResult, ReadArgs, ReadResult, WriteArgs, WriteResult};
 
@@ -20,6 +21,7 @@ pub async fn write(
     let connection = lookup_connection(connections, &args.connection_id).await?;
     let bytes =
         codec::decode(encoding, &args.data).map_err(|e| format!("Data decoding failed - {e}"))?;
+    clamp_or_err("write.data.len()", bytes.len(), MAX_WRITE_BYTES)?;
     let bytes_written = connection.write(&bytes).await.map_err(|e| {
         log_tool_err(
             "write",
@@ -50,10 +52,14 @@ pub async fn read(
 
     let encoding = parse_encoding(&args.encoding)?;
     let connection = lookup_connection(connections, &args.connection_id).await?;
+    let max_bytes = clamp_or_err("read.max_bytes", args.max_bytes, MAX_READ_BYTES)?;
+    if let Some(timeout_ms) = args.timeout_ms {
+        clamp_timeout_or_err("read.timeout_ms", timeout_ms, MAX_TIMEOUT_MS)?;
+    }
     let progress_token = meta.get_progress_token();
     let outcome = read_bytes(
         &connection,
-        args.max_bytes,
+        max_bytes,
         args.timeout_ms,
         &ct,
         progress_token,
