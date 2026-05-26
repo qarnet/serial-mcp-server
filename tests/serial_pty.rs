@@ -106,7 +106,7 @@ async fn pty_device_write_then_client_read() {
     let structured = result.structured_content.expect("structured");
     assert_eq!(structured["bytes_read"], json!(6));
     assert_eq!(structured["data"], json!("PONG\r\n"));
-    assert_eq!(structured["timed_out"], json!(false));
+    assert!(structured.get("timed_out").is_none(), "{structured:?}");
     client.cancel().await.ok();
 }
 
@@ -179,7 +179,7 @@ async fn pty_wait_for_matches_real_serial_pattern() {
     writer.await.unwrap();
     assert_ne!(result.is_error, Some(true), "{result:?}");
     let structured = result.structured_content.expect("structured");
-    assert_eq!(structured["timed_out"], json!(false), "{structured:?}");
+    assert!(structured.get("timed_out").is_none(), "{structured:?}");
     assert_eq!(structured["matched"], json!(true), "{structured:?}");
     let match_index = structured["match_index"].as_u64().unwrap();
     let data = structured["data"].as_str().unwrap();

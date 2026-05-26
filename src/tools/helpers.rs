@@ -326,7 +326,6 @@ pub fn build_read_result(
         bytes_read,
         encoding: encoding.to_string(),
         data,
-        timed_out: false,
         timeout_ms,
         elapsed_ms,
     }))
@@ -490,7 +489,6 @@ mod tests {
         };
         let Json(result) = build_read_result(outcome, "abc".into(), Encoding::Hex, Some(500))
             .expect("data result must build");
-        assert!(!result.timed_out);
         assert_eq!(result.bytes_read, 2);
         assert_eq!(result.encoding, "hex");
         assert_eq!(result.data, "48 69");

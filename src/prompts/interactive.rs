@@ -17,7 +17,7 @@ MCP tools. Conventions:\n\
 - Append `{line_ending}` to every line the user wants to send.\n\
 - After each `write`, call `wait_for(connection_id=\"{id}\", pattern={prompt}, \
 timeout_ms=2000)` to read the response up to {prompt}.\n\
-- If `wait_for` reports `timed_out=true`, surface the partial buffer and ask the user \
+- If `wait_for` returns an error about timeout, surface the partial buffer and ask the user \
 how to proceed instead of retrying blindly.\n\
 - Decode the response data as UTF-8 unless it contains bytes the codec rejects, in \
 which case fall back to hex and tell the user.\n\

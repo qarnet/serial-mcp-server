@@ -42,6 +42,13 @@ pub async fn wait_for(
     )
     .await?;
 
+    if outcome.timed_out {
+        return Err(format!(
+            "wait_for timed out after {}ms on {}",
+            args.timeout_ms, args.connection_id
+        ));
+    }
+
     let bytes_read = outcome.bytes.len();
     let data = codec::encode(response_encoding, &outcome.bytes)
         .map_err(|e| format!("Response encoding failed - {e}"))?;
@@ -49,7 +56,6 @@ pub async fn wait_for(
     Ok(Json(WaitForResult {
         connection_id: args.connection_id,
         matched: outcome.match_index.is_some(),
-        timed_out: outcome.timed_out,
         data,
         bytes_read,
         match_index: outcome.match_index,

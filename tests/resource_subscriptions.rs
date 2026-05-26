@@ -1,50 +1,28 @@
-//! Test resource subscription functionality.
+//! Layer 2 — Resource subscription tests using the in-process HTTP harness.
+//!
+//! These tests exercise the MCP resource subscribe/unsubscribe protocol
+//! methods against the `SerialHandler`. No child processes or OS serial
+//! ports are involved.
 
-use rmcp::transport::{child_process::TokioChildProcess, ConfigureCommandExt};
-use rmcp::ServiceExt;
-use tokio::process::Command;
+use rmcp::model::{SubscribeRequestParams, UnsubscribeRequestParams};
 
-fn build_stdio_server() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        let output = std::process::Command::new("cargo")
-            .args(["build", "--bin", "serial-mcp-server"])
-            .output()
-            .expect("cargo build");
-        if !output.status.success() {
-            panic!(
-                "cargo build --bin serial-mcp-server failed:\nstderr: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-    });
-}
+mod common;
+use common::{connect_client, TestServer};
 
 #[tokio::test]
 async fn resource_subscription_works() {
-    build_stdio_server();
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
 
-    let cmd = Command::new(
-        std::env::current_dir()
-            .unwrap()
-            .join("target/debug/serial-mcp-server"),
-    )
-    .configure(|cmd| {
-        cmd.env("RUST_LOG", "off");
-    });
-
-    let transport = TokioChildProcess::new(cmd).expect("spawn stdio server");
-    let client = ().serve(transport).await.expect("initialize client");
-
-    // Subscribe to a resource
     client
-        .subscribe(rmcp::model::SubscribeRequestParams::new("serial://ports"))
+        .peer()
+        .subscribe(SubscribeRequestParams::new("serial://ports"))
         .await
         .expect("subscribe to ports resource");
 
-    // Unsubscribe
     client
-        .unsubscribe(rmcp::model::UnsubscribeRequestParams::new("serial://ports"))
+        .peer()
+        .unsubscribe(UnsubscribeRequestParams::new("serial://ports"))
         .await
         .expect("unsubscribe from ports resource");
 
@@ -53,41 +31,24 @@ async fn resource_subscription_works() {
 
 #[tokio::test]
 async fn resource_subscribe_unsubscribe_roundtrip() {
-    build_stdio_server();
+    let server = TestServer::start().await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
 
-    let cmd = Command::new(
-        std::env::current_dir()
-            .unwrap()
-            .join("target/debug/serial-mcp-server"),
-    )
-    .configure(|cmd| {
-        cmd.env("RUST_LOG", "off");
-    });
-
-    let transport = TokioChildProcess::new(cmd).expect("spawn stdio server");
-    let client = ().serve(transport).await.expect("initialize client");
-
-    // Subscribe
     client
-        .subscribe(rmcp::model::SubscribeRequestParams::new(
-            "serial://connections",
-        ))
+        .peer()
+        .subscribe(SubscribeRequestParams::new("serial://connections"))
         .await
         .expect("subscribe");
 
-    // Subscribe again (should succeed - idempotent)
     client
-        .subscribe(rmcp::model::SubscribeRequestParams::new(
-            "serial://connections",
-        ))
+        .peer()
+        .subscribe(SubscribeRequestParams::new("serial://connections"))
         .await
         .expect("subscribe again");
 
-    // Unsubscribe
     client
-        .unsubscribe(rmcp::model::UnsubscribeRequestParams::new(
-            "serial://connections",
-        ))
+        .peer()
+        .unsubscribe(UnsubscribeRequestParams::new("serial://connections"))
         .await
         .expect("unsubscribe");
 

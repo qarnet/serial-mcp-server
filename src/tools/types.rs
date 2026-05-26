@@ -143,7 +143,6 @@ pub struct ReadResult {
     pub bytes_read: usize,
     pub encoding: String,
     pub data: String,
-    pub timed_out: bool,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub timeout_ms: u64,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
@@ -193,7 +192,6 @@ pub struct UnsubscribeResult {
 pub struct WaitForResult {
     pub connection_id: String,
     pub matched: bool,
-    pub timed_out: bool,
     pub data: String,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub bytes_read: usize,
