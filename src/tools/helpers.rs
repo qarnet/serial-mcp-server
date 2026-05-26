@@ -8,7 +8,7 @@ use rmcp::{
     service::Peer,
     Json, RoleServer,
 };
-use tracing::error;
+use tracing::{error, warn};
 
 use crate::codec::{self, Encoding};
 use crate::error::SerialError;
@@ -307,7 +307,28 @@ pub async fn stream_rx(
                 let chunk = &buf[..n];
                 let encoded = match codec::encode(encoding, chunk) {
                     Ok(s) => s,
-                    Err(_) => continue,
+                    Err(e) => {
+                        warn!(
+                            "RX encoding error on {}: {encoding} cannot encode {} bytes — dropped",
+                            connection.id(),
+                            n
+                        );
+                        // Emit a warning notification so the client is aware of dropped bytes
+                        let payload = serde_json::json!({
+                            "connection_id": connection.id(),
+                            "encoding_error": true,
+                            "encoding": encoding.to_string(),
+                            "bytes_dropped": n,
+                            "reason": e.to_string(),
+                        });
+                        let param = LoggingMessageNotificationParam {
+                            level: LoggingLevel::Warning,
+                            logger: Some(logger.clone()),
+                            data: payload,
+                        };
+                        let _ = peer.notify_logging_message(param).await;
+                        continue;
+                    }
                 };
                 let payload = serde_json::json!({
                     "connection_id": connection.id(),
