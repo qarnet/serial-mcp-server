@@ -76,7 +76,13 @@ impl SerialHandler {
     /// with a fake (in-memory) connection before exposing the handler over
     /// MCP, instead of going through the OS-level `open` path.
     pub fn with_manager(connections: Arc<ConnectionManager>) -> Self {
-        let security = SecurityManager::from_env();
+        Self::with_manager_and_security(connections, SecurityManager::from_env())
+    }
+
+    pub fn with_manager_and_security(
+        connections: Arc<ConnectionManager>,
+        security: SecurityManager,
+    ) -> Self {
         Self {
             connections,
             streams: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -104,14 +110,10 @@ impl SerialHandler {
         Parameters(args): Parameters<OpenArgs>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<Json<OpenResult>, String> {
-        port_ops::open(
-            &self.connections,
-            &self.security,
-            &self.subscribers,
-            args,
-            ctx,
-        )
-        .await
+        let result = port_ops::open(&self.connections, &self.security, args).await?;
+        let connection_id = result.0.connection_id.clone();
+        self.notify_resource_changed(&connection_id, &ctx).await;
+        Ok(result)
     }
 
     #[tool(
@@ -124,7 +126,10 @@ impl SerialHandler {
         Parameters(args): Parameters<CloseArgs>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<Json<CloseResult>, String> {
-        port_ops::close(&self.connections, &self.subscribers, args, ctx).await
+        let connection_id = args.connection_id.clone();
+        let result = port_ops::close(&self.connections, args).await?;
+        self.notify_resource_changed(&connection_id, &ctx).await;
+        Ok(result)
     }
 
     #[tool(
@@ -286,6 +291,27 @@ impl SerialHandler {
                 } else {
                     vec![]
                 }
+            }
+        }
+    }
+
+    async fn notify_resource_changed(&self, connection_id: &str, ctx: &RequestContext<RoleServer>) {
+        if let Err(e) = ctx.peer.notify_resource_list_changed().await {
+            debug!("Failed to notify resource list changed: {e}");
+        }
+        let conn_uri = format!("{URI_CONNECTION_PREFIX}{connection_id}");
+        let subs = self.subscribers.lock().await;
+        let should_notify = subs.get(&conn_uri).is_some_and(|count| *count > 0);
+        drop(subs);
+        if should_notify {
+            if let Err(e) = ctx
+                .peer
+                .notify_resource_updated(rmcp::model::ResourceUpdatedNotificationParam::new(
+                    conn_uri,
+                ))
+                .await
+            {
+                debug!("Failed to notify resource updated: {e}");
             }
         }
     }
@@ -476,28 +502,33 @@ impl ServerHandler for SerialHandler {
                     )
                 })?;
 
-                // Check if requesting raw binary data
-                if uri.ends_with("/raw") {
-                    let raw_bytes = conn.read_latest(256).await.map_err(|e| {
-                        McpError::internal_error(format!("Failed to read: {e}"), None)
-                    })?;
-                    let b64 = base64::engine::general_purpose::STANDARD.encode(&raw_bytes);
-                    Ok(ReadResourceResult::new(vec![ResourceContents::blob(
-                        b64, uri,
+                let body = serde_json::to_string_pretty(&ConnectionSummary {
+                    connection_id: conn.id().to_string(),
+                    port: conn.port().to_string(),
+                    latest_read: None,
+                })
+                .map_err(|e| McpError::internal_error(format!("serialize: {e}"), None))?;
+                Ok(ReadResourceResult::new(vec![ResourceContents::text(
+                    body, uri,
+                )
+                .with_mime_type("application/json")]))
+            }
+            ResourceUriKind::ConnectionDetailRaw(id) => {
+                let conn = self.connections.get(&id).await.map_err(|_| {
+                    McpError::resource_not_found(
+                        "connection_not_found",
+                        Some(serde_json::json!({ "uri": uri, "connection_id": id })),
                     )
-                    .with_mime_type("application/octet-stream")]))
-                } else {
-                    let body = serde_json::to_string_pretty(&ConnectionSummary {
-                        connection_id: conn.id().to_string(),
-                        port: conn.port().to_string(),
-                        latest_read: None,
-                    })
-                    .map_err(|e| McpError::internal_error(format!("serialize: {e}"), None))?;
-                    Ok(ReadResourceResult::new(vec![ResourceContents::text(
-                        body, uri,
-                    )
-                    .with_mime_type("application/json")]))
-                }
+                })?;
+                let raw_bytes = conn
+                    .read_latest(256)
+                    .await
+                    .map_err(|e| McpError::internal_error(format!("Failed to read: {e}"), None))?;
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&raw_bytes);
+                Ok(ReadResourceResult::new(vec![ResourceContents::blob(
+                    b64, uri,
+                )
+                .with_mime_type("application/octet-stream")]))
             }
             ResourceUriKind::Unknown => Err(McpError::resource_not_found(
                 "resource_not_found",
@@ -553,7 +584,7 @@ impl ServerHandler for SerialHandler {
 
 use crate::resources::{
     parse_resource_uri, ConnectionsResource, ResourceUriKind, URI_CONNECTIONS,
-    URI_CONNECTION_RAW_TEMPLATE, URI_CONNECTION_TEMPLATE, URI_PORTS,
+    URI_CONNECTION_PREFIX, URI_CONNECTION_RAW_TEMPLATE, URI_CONNECTION_TEMPLATE, URI_PORTS,
 };
 
 #[cfg(test)]

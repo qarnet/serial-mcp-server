@@ -146,6 +146,7 @@ pub struct ReadResult {
     pub timed_out: bool,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub timeout_ms: u64,
+    pub elapsed_ms: u64,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -166,6 +167,7 @@ pub struct SendBreakResult {
     pub connection_id: String,
     #[schemars(schema_with = "crate::schema_helpers::uint_schema")]
     pub duration_ms: u64,
+    pub actual_duration_ms: u64,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -228,7 +230,7 @@ pub fn default_break_duration_ms() -> u64 {
     250
 }
 pub fn default_wait_timeout_ms() -> u64 {
-    5000
+    2000
 }
 pub fn default_wait_max_bytes() -> usize {
     4096

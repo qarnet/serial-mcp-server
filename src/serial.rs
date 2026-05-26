@@ -28,7 +28,7 @@ pub const MAX_BAUD_RATE: u32 = 4_000_000;
 
 // ---- Configuration enums -----------------------------------------------------
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
 pub enum DataBits {
     #[serde(rename = "5")]
     Five,
@@ -51,7 +51,7 @@ impl From<DataBits> for serialport::DataBits {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
 pub enum StopBits {
     #[serde(rename = "1")]
     One,
@@ -68,7 +68,7 @@ impl From<StopBits> for serialport::StopBits {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Parity {
     None,
@@ -86,7 +86,7 @@ impl From<Parity> for serialport::Parity {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum FlowControl {
     None,
@@ -105,7 +105,7 @@ impl From<FlowControl> for serialport::FlowControl {
 }
 
 /// Concrete parameters required to open a serial port.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, JsonSchema)]
 pub struct ConnectionConfig {
     pub port: String,
     pub baud_rate: u32,

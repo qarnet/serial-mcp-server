@@ -42,6 +42,7 @@ pub async fn lookup_connection(
 pub struct ReadOutcome {
     pub bytes: Vec<u8>,
     pub timed_out: bool,
+    pub elapsed_ms: u64,
 }
 
 pub async fn read_bytes(
@@ -56,6 +57,7 @@ pub async fn read_bytes(
 
     let effective_timeout = timeout_ms.unwrap_or(DEFAULT_READ_TIMEOUT_MS);
     let deadline = Instant::now() + Duration::from_millis(effective_timeout);
+    let read_start = Instant::now();
     let mut buf = vec![0u8; max_bytes];
 
     let mut last_progress = Instant::now();
@@ -67,6 +69,7 @@ pub async fn read_bytes(
             return Ok(ReadOutcome {
                 bytes: Vec::new(),
                 timed_out: true,
+                elapsed_ms: read_start.elapsed().as_millis() as u64,
             });
         }
 
@@ -99,17 +102,6 @@ pub async fn read_bytes(
             }
         }
     };
-
-    if let (Some(token), Some(peer)) = (progress_token.clone(), peer) {
-        let _ = peer
-            .notify_progress(ProgressNotificationParam {
-                progress_token: token,
-                progress: 0.0,
-                total: Some(effective_timeout as f64),
-                message: Some("read started".to_string()),
-            })
-            .await;
-    }
 
     let mut total = first_n;
     while total < max_bytes {
@@ -151,6 +143,7 @@ pub async fn read_bytes(
     Ok(ReadOutcome {
         bytes: buf,
         timed_out: false,
+        elapsed_ms: read_start.elapsed().as_millis() as u64,
     })
 }
 
@@ -320,16 +313,12 @@ pub fn build_read_result(
 ) -> Result<Json<ReadResult>, String> {
     let timeout_ms = requested_timeout_ms.unwrap_or(DEFAULT_READ_TIMEOUT_MS);
     if outcome.timed_out {
-        return Ok(Json(ReadResult {
-            connection_id,
-            bytes_read: 0,
-            encoding: encoding.to_string(),
-            data: String::new(),
-            timed_out: true,
-            timeout_ms,
-        }));
+        return Err(format!(
+            "Read timed out after {timeout_ms}ms on {connection_id}"
+        ));
     }
     let bytes_read = outcome.bytes.len();
+    let elapsed_ms = outcome.elapsed_ms;
     let data = codec::encode(encoding, &outcome.bytes)
         .map_err(|e| format!("Data encoding failed - {e}"))?;
     Ok(Json(ReadResult {
@@ -339,6 +328,7 @@ pub fn build_read_result(
         data,
         timed_out: false,
         timeout_ms,
+        elapsed_ms,
     }))
 }
 
@@ -460,17 +450,19 @@ mod tests {
     }
 
     #[test]
-    fn build_read_result_timeout_branch() {
+    fn build_read_result_timeout_returns_err() {
         let outcome = ReadOutcome {
             bytes: Vec::new(),
             timed_out: true,
+            elapsed_ms: 250,
         };
-        let Json(result) = build_read_result(outcome, "abc".into(), Encoding::Utf8, Some(250))
-            .expect("timeout result must build");
-        assert!(result.timed_out);
-        assert_eq!(result.bytes_read, 0);
-        assert_eq!(result.timeout_ms, 250);
-        assert!(result.data.is_empty());
+        match build_read_result(outcome, "abc".into(), Encoding::Utf8, Some(250)) {
+            Err(err) => {
+                assert!(err.contains("timed out"));
+                assert!(err.contains("250ms"));
+            }
+            Ok(_) => panic!("timeout must return Err"),
+        }
     }
 
     #[test]
@@ -478,10 +470,15 @@ mod tests {
         let outcome = ReadOutcome {
             bytes: Vec::new(),
             timed_out: true,
+            elapsed_ms: DEFAULT_READ_TIMEOUT_MS,
         };
-        let Json(result) = build_read_result(outcome, "abc".into(), Encoding::Hex, None)
-            .expect("timeout result must build");
-        assert_eq!(result.timeout_ms, DEFAULT_READ_TIMEOUT_MS);
+        match build_read_result(outcome, "abc".into(), Encoding::Hex, None) {
+            Err(err) => {
+                assert!(err.contains("timed out"));
+                assert!(err.contains(&DEFAULT_READ_TIMEOUT_MS.to_string()));
+            }
+            Ok(_) => panic!("timeout must return Err"),
+        }
     }
 
     #[test]
@@ -489,6 +486,7 @@ mod tests {
         let outcome = ReadOutcome {
             bytes: b"Hi".to_vec(),
             timed_out: false,
+            elapsed_ms: 42,
         };
         let Json(result) = build_read_result(outcome, "abc".into(), Encoding::Hex, Some(500))
             .expect("data result must build");
@@ -496,6 +494,7 @@ mod tests {
         assert_eq!(result.bytes_read, 2);
         assert_eq!(result.encoding, "hex");
         assert_eq!(result.data, "48 69");
+        assert_eq!(result.elapsed_ms, 42);
     }
 
     #[test]

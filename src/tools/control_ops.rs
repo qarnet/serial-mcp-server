@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::sync::Arc;
 
 use rmcp::{model::Meta, Json, Peer, RoleServer};
@@ -58,10 +59,20 @@ pub async fn send_break(
 
     struct BreakResetGuard {
         connection: Arc<SerialConnection>,
+        disarmed: Cell<bool>,
+    }
+
+    impl BreakResetGuard {
+        fn disarm(&self) {
+            self.disarmed.set(true);
+        }
     }
 
     impl Drop for BreakResetGuard {
         fn drop(&mut self) {
+            if self.disarmed.get() {
+                return;
+            }
             let connection = Arc::clone(&self.connection);
             tokio::spawn(async move {
                 let _ = connection.set_break_state(false).await;
@@ -73,8 +84,9 @@ pub async fn send_break(
         .set_break_state(true)
         .await
         .map_err(|e| log_tool_err("send_break", "Failed to assert BREAK", e))?;
-    let _guard = BreakResetGuard {
+    let guard = BreakResetGuard {
         connection: Arc::clone(&connection),
+        disarmed: Cell::new(false),
     };
 
     let progress_token = meta.get_progress_token();
@@ -117,10 +129,13 @@ pub async fn send_break(
         .set_break_state(false)
         .await
         .map_err(|e| log_tool_err("send_break", "Failed to release BREAK", e))?;
+    guard.disarm();
+
+    let actual_duration_ms = start.elapsed().as_millis() as u64;
 
     info!(
-        "Sent break on {} for {}ms",
-        args.connection_id, args.duration_ms
+        "Sent break on {} for {}ms (actual {}ms)",
+        args.connection_id, args.duration_ms, actual_duration_ms
     );
 
     if let Some(token) = progress_token {
@@ -137,5 +152,6 @@ pub async fn send_break(
     Ok(Json(SendBreakResult {
         connection_id: args.connection_id,
         duration_ms: args.duration_ms,
+        actual_duration_ms,
     }))
 }

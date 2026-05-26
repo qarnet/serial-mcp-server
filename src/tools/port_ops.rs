@@ -1,7 +1,6 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use rmcp::{service::RequestContext, Json, RoleServer};
+use rmcp::Json;
 use tracing::{debug, info};
 
 use crate::security::SecurityManager;
@@ -9,8 +8,6 @@ use crate::serial::{ConnectionManager, PortInfo};
 use crate::tools::helpers::log_tool_err;
 use crate::tools::helpers::parse_open_args;
 use crate::tools::types::{CloseArgs, CloseResult, ListPortsResult, OpenArgs, OpenResult};
-
-use crate::resources::URI_CONNECTION_PREFIX;
 
 pub async fn list_ports() -> Result<Json<ListPortsResult>, String> {
     debug!("Listing serial ports");
@@ -26,9 +23,7 @@ pub async fn list_ports() -> Result<Json<ListPortsResult>, String> {
 pub async fn open(
     connections: &Arc<ConnectionManager>,
     security: &SecurityManager,
-    subscribers: &Arc<tokio::sync::Mutex<HashMap<String, usize>>>,
     args: OpenArgs,
-    ctx: RequestContext<RoleServer>,
 ) -> Result<Json<OpenResult>, String> {
     let config = parse_open_args(args)?;
     let port = config.port.clone();
@@ -48,25 +43,6 @@ pub async fn open(
         .map_err(|e| log_tool_err("open", &format!("Failed to open port {port}"), e))?;
     info!("Opened connection {} -> {}", connection_id, port);
 
-    if let Err(e) = ctx.peer.notify_resource_list_changed().await {
-        debug!("Failed to notify resource list changed: {e}");
-    }
-
-    let conn_uri = format!("{URI_CONNECTION_PREFIX}{connection_id}");
-    let subs = subscribers.lock().await;
-    let should_notify = subs.get(&conn_uri).is_some_and(|count| *count > 0);
-    drop(subs);
-
-    if should_notify {
-        if let Err(e) = ctx
-            .peer
-            .notify_resource_updated(rmcp::model::ResourceUpdatedNotificationParam::new(conn_uri))
-            .await
-        {
-            debug!("Failed to notify resource updated: {e}");
-        }
-    }
-
     Ok(Json(OpenResult {
         connection_id,
         port,
@@ -76,9 +52,7 @@ pub async fn open(
 
 pub async fn close(
     connections: &Arc<ConnectionManager>,
-    subscribers: &Arc<tokio::sync::Mutex<HashMap<String, usize>>>,
     args: CloseArgs,
-    ctx: RequestContext<RoleServer>,
 ) -> Result<Json<CloseResult>, String> {
     debug!("Closing {}", args.connection_id);
 
@@ -90,25 +64,6 @@ pub async fn close(
         )
     })?;
     info!("Closed connection {}", args.connection_id);
-
-    if let Err(e) = ctx.peer.notify_resource_list_changed().await {
-        debug!("Failed to notify resource list changed: {e}");
-    }
-
-    let conn_uri = format!("{URI_CONNECTION_PREFIX}{}", args.connection_id);
-    let subs = subscribers.lock().await;
-    let should_notify = subs.get(&conn_uri).is_some_and(|count| *count > 0);
-    drop(subs);
-
-    if should_notify {
-        if let Err(e) = ctx
-            .peer
-            .notify_resource_updated(rmcp::model::ResourceUpdatedNotificationParam::new(conn_uri))
-            .await
-        {
-            debug!("Failed to notify resource updated: {e}");
-        }
-    }
 
     Ok(Json(CloseResult {
         connection_id: args.connection_id,

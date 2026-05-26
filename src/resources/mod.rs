@@ -12,6 +12,7 @@ pub enum ResourceUriKind {
     Ports,
     ConnectionsList,
     ConnectionDetail(String),
+    ConnectionDetailRaw(String),
     Unknown,
 }
 
@@ -20,9 +21,18 @@ pub fn parse_resource_uri(uri: &str) -> ResourceUriKind {
         URI_PORTS => ResourceUriKind::Ports,
         URI_CONNECTIONS => ResourceUriKind::ConnectionsList,
         other => match other.strip_prefix(URI_CONNECTION_PREFIX) {
-            Some(id) if !id.is_empty() && !id.contains('/') => {
-                ResourceUriKind::ConnectionDetail(id.to_string())
-            }
+            Some(rest) if !rest.is_empty() => match rest.strip_suffix("/raw") {
+                Some(id) if !id.is_empty() && !id.contains('/') => {
+                    ResourceUriKind::ConnectionDetailRaw(id.to_string())
+                }
+                _ => {
+                    if rest.contains('/') {
+                        ResourceUriKind::Unknown
+                    } else {
+                        ResourceUriKind::ConnectionDetail(rest.to_string())
+                    }
+                }
+            },
             _ => ResourceUriKind::Unknown,
         },
     }
@@ -43,6 +53,10 @@ mod tests {
             parse_resource_uri("serial://connections/abc-123"),
             ResourceUriKind::ConnectionDetail("abc-123".into())
         );
+        assert_eq!(
+            parse_resource_uri("serial://connections/abc-123/raw"),
+            ResourceUriKind::ConnectionDetailRaw("abc-123".into())
+        );
     }
 
     #[test]
@@ -53,6 +67,10 @@ mod tests {
         );
         assert_eq!(
             parse_resource_uri("serial://connections/"),
+            ResourceUriKind::Unknown
+        );
+        assert_eq!(
+            parse_resource_uri("serial://connections//raw"),
             ResourceUriKind::Unknown
         );
         assert_eq!(

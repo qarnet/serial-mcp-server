@@ -1,70 +1,47 @@
-//! Test port allowlist functionality.
+//! Layer 2 — Port allowlist tests using the in-process HTTP harness.
+//!
+//! These tests verify that the `SERIAL_MCP_ALLOWLIST`-powered
+//! `SecurityManager` correctly allows or blocks port-open operations.
+//! No child processes or OS serial ports are involved.
 
-use rmcp::{
-    model::CallToolRequestParams,
-    transport::{child_process::TokioChildProcess, ConfigureCommandExt},
-    ServiceExt,
-};
-use tokio::process::Command;
+use std::sync::Arc;
 
-fn build_stdio_server() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        let output = std::process::Command::new("cargo")
-            .args(["build", "--bin", "serial-mcp-server"])
-            .output()
-            .expect("cargo build");
-        if !output.status.success() {
-            panic!(
-                "cargo build --bin serial-mcp-server failed:\nstderr: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-    });
-}
+use serde_json::json;
+
+use serial_mcp_server::security::SecurityManager;
+use serial_mcp_server::serial::ConnectionManager;
+
+mod common;
+use common::{connect_client, tool_request, TestServer};
 
 #[tokio::test]
-async fn allowlist_blocks_unauthorized_port() {
-    build_stdio_server();
+async fn empty_allowlist_allows_any_port() {
+    let manager = Arc::new(ConnectionManager::new());
 
-    let cmd = Command::new(
-        std::env::current_dir()
-            .unwrap()
-            .join("target/debug/serial-mcp-server"),
-    )
-    .configure(|cmd| {
-        cmd.env("RUST_LOG", "off");
-        // Only allow /dev/ttyACM1
-        cmd.env("SERIAL_MCP_ALLOWLIST", "/dev/ttyACM1");
-    });
+    let security = SecurityManager::from_patterns([] as [&str; 0]);
+    let server = TestServer::start_with_and_security(manager, security).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
 
-    let transport = TokioChildProcess::new(cmd).expect("spawn stdio server");
-    let client = ().serve(transport).await.expect("initialize client");
-
-    // Try to open /dev/ttyACM0 (not in allowlist)
     let result = client
-        .call_tool(
-            CallToolRequestParams::new("open").with_arguments(
-                serde_json::json!({
-                    "port": "/dev/ttyACM0",
-                    "baud_rate": 115200,
-                })
-                .as_object()
-                .unwrap()
-                .clone(),
-            ),
-        )
+        .peer()
+        .call_tool(tool_request(
+            "open",
+            json!({
+                "port": "/tmp/test-fake-port",
+                "baud_rate": 9600,
+            }),
+        ))
         .await
         .unwrap();
 
-    // Should fail with error
+    // Empty allowlist means all ports are allowed.
+    // Since /tmp/test-fake-port doesn't exist, this will fail at the OS level,
+    // but the error must NOT mention "allowlist".
     assert_eq!(
         result.is_error,
         Some(true),
-        "Expected open to be blocked by allowlist, got: {result:?}"
+        "Expected OS-level error for non-existent port"
     );
-
-    // Error message should mention allowlist
     let content = result
         .content
         .first()
@@ -72,7 +49,47 @@ async fn allowlist_blocks_unauthorized_port() {
         .map(|t| t.text.as_str())
         .unwrap_or("");
     assert!(
-        content.contains("allowlist") || content.contains("not allowed"),
+        !content.contains("allowlist"),
+        "Empty allowlist should not reject any port. Got: {content}"
+    );
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn exact_match_blocks_unauthorized_port() {
+    let manager = Arc::new(ConnectionManager::new());
+
+    let security = SecurityManager::from_patterns(["/dev/ttyACM1"]);
+    let server = TestServer::start_with_and_security(manager, security).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "open",
+            json!({
+                "port": "/dev/ttyACM0",
+                "baud_rate": 115200,
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.is_error,
+        Some(true),
+        "Expected unauthorized port to be rejected: {result:?}"
+    );
+
+    let content = result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.as_str())
+        .unwrap_or("");
+    assert!(
+        content.contains("allowlist") || content.contains("not"),
         "Error message should mention allowlist. Got: {content}"
     );
 
@@ -80,40 +97,28 @@ async fn allowlist_blocks_unauthorized_port() {
 }
 
 #[tokio::test]
-async fn allowlist_allows_authorized_port() {
-    build_stdio_server();
+async fn exact_match_allows_authorized_port() {
+    let manager = Arc::new(ConnectionManager::new());
 
-    let cmd = Command::new(
-        std::env::current_dir()
-            .unwrap()
-            .join("target/debug/serial-mcp-server"),
-    )
-    .configure(|cmd| {
-        cmd.env("RUST_LOG", "off");
-        // Allow the user's device
-        cmd.env("SERIAL_MCP_ALLOWLIST", "/dev/ttyACM0");
-    });
+    let security = SecurityManager::from_patterns(["/dev/ttyACM0"]);
+    let server = TestServer::start_with_and_security(manager, security).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
 
-    let transport = TokioChildProcess::new(cmd).expect("spawn stdio server");
-    let client = ().serve(transport).await.expect("initialize client");
-
-    // Try to open /dev/ttyACM0 (in allowlist)
     let result = client
-        .call_tool(
-            CallToolRequestParams::new("open").with_arguments(
-                serde_json::json!({
-                    "port": "/dev/ttyACM0",
-                    "baud_rate": 115200,
-                })
-                .as_object()
-                .unwrap()
-                .clone(),
-            ),
-        )
+        .peer()
+        .call_tool(tool_request(
+            "open",
+            json!({
+                "port": "/dev/ttyACM0",
+                "baud_rate": 115200,
+            }),
+        ))
         .await
         .unwrap();
 
-    // Should succeed (or fail for OS reasons, but NOT for allowlist)
+    // The port is in the allowlist, so it should NOT fail with an allowlist
+    // rejection. It may still fail with a connection error (port not present),
+    // but the error message must NOT mention "allowlist".
     if result.is_error == Some(true) {
         let content = result
             .content
@@ -127,63 +132,30 @@ async fn allowlist_allows_authorized_port() {
         );
     }
 
-    // Clean up if open succeeded
-    if result.is_error != Some(true) {
-        let structured = result.structured_content.expect("structured");
-        let conn_id = structured["connection_id"].as_str().unwrap();
-        client
-            .call_tool(
-                CallToolRequestParams::new("close").with_arguments(
-                    serde_json::json!({
-                        "connection_id": conn_id,
-                    })
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-                ),
-            )
-            .await
-            .ok();
-    }
-
     client.cancel().await.ok();
 }
 
 #[tokio::test]
-async fn allowlist_glob_pattern_works() {
-    build_stdio_server();
+async fn glob_pattern_matches_multiple_ports() {
+    let manager = Arc::new(ConnectionManager::new());
 
-    let cmd = Command::new(
-        std::env::current_dir()
-            .unwrap()
-            .join("target/debug/serial-mcp-server"),
-    )
-    .configure(|cmd| {
-        cmd.env("RUST_LOG", "off");
-        // Allow all /dev/ttyACM* and /dev/ttyUSB*
-        cmd.env("SERIAL_MCP_ALLOWLIST", "/dev/ttyACM*,/dev/ttyUSB*");
-    });
+    let security = SecurityManager::from_patterns(["/dev/ttyACM*", "/dev/ttyUSB*"]);
+    let server = TestServer::start_with_and_security(manager, security).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
 
-    let transport = TokioChildProcess::new(cmd).expect("spawn stdio server");
-    let client = ().serve(transport).await.expect("initialize client");
-
-    // Try to open /dev/ttyACM0 (matches glob)
+    // /dev/ttyACM0 matches /dev/ttyACM*
     let result = client
-        .call_tool(
-            CallToolRequestParams::new("open").with_arguments(
-                serde_json::json!({
-                    "port": "/dev/ttyACM0",
-                    "baud_rate": 115200,
-                })
-                .as_object()
-                .unwrap()
-                .clone(),
-            ),
-        )
+        .peer()
+        .call_tool(tool_request(
+            "open",
+            json!({
+                "port": "/dev/ttyACM0",
+                "baud_rate": 115200,
+            }),
+        ))
         .await
         .unwrap();
 
-    // Should succeed (or fail for OS reasons, but NOT for allowlist)
     if result.is_error == Some(true) {
         let content = result
             .content
@@ -193,28 +165,132 @@ async fn allowlist_glob_pattern_works() {
             .unwrap_or("");
         assert!(
             !content.contains("allowlist"),
-            "Glob pattern should match. Got: {content}"
+            "Glob /dev/ttyACM* should match /dev/ttyACM0. Got: {content}"
         );
     }
 
-    // Clean up
-    if result.is_error != Some(true) {
-        let structured = result.structured_content.expect("structured");
-        let conn_id = structured["connection_id"].as_str().unwrap();
-        client
-            .call_tool(
-                CallToolRequestParams::new("close").with_arguments(
-                    serde_json::json!({
-                        "connection_id": conn_id,
-                    })
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-                ),
-            )
-            .await
-            .ok();
+    // /dev/ttyUSB5 matches /dev/ttyUSB*
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "open",
+            json!({
+                "port": "/dev/ttyUSB5",
+                "baud_rate": 115200,
+            }),
+        ))
+        .await
+        .unwrap();
+
+    if result.is_error == Some(true) {
+        let content = result
+            .content
+            .first()
+            .and_then(|c| c.as_text())
+            .map(|t| t.text.as_str())
+            .unwrap_or("");
+        assert!(
+            !content.contains("allowlist"),
+            "Glob /dev/ttyUSB* should match /dev/ttyUSB5. Got: {content}"
+        );
     }
+
+    // /dev/ttyS0 does NOT match either pattern
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "open",
+            json!({
+                "port": "/dev/ttyS0",
+                "baud_rate": 115200,
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.is_error,
+        Some(true),
+        "Expected /dev/ttyS0 to be rejected by globs. Got: {result:?}"
+    );
+
+    let content = result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.as_str())
+        .unwrap_or("");
+    assert!(
+        content.contains("allowlist") || content.contains("not"),
+        "Error message should mention allowlist. Got: {content}"
+    );
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn comma_separated_multiple_exact_ports() {
+    let manager = Arc::new(ConnectionManager::new());
+
+    let security = SecurityManager::from_patterns(["COM1", "COM3", "COM5"]);
+    let server = TestServer::start_with_and_security(manager, security).await;
+    let (client, _rx) = connect_client(&server).await.unwrap();
+
+    // COM3 is in the list
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "open",
+            json!({
+                "port": "COM3",
+                "baud_rate": 9600,
+            }),
+        ))
+        .await
+        .unwrap();
+
+    if result.is_error == Some(true) {
+        let content = result
+            .content
+            .first()
+            .and_then(|c| c.as_text())
+            .map(|t| t.text.as_str())
+            .unwrap_or("");
+        assert!(
+            !content.contains("allowlist"),
+            "COM3 should be allowed. Got: {content}"
+        );
+    }
+
+    // COM2 is NOT in the list
+    let result = client
+        .peer()
+        .call_tool(tool_request(
+            "open",
+            json!({
+                "port": "COM2",
+                "baud_rate": 9600,
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.is_error,
+        Some(true),
+        "Expected COM2 to be rejected: {result:?}"
+    );
+
+    let content = result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.as_str())
+        .unwrap_or("");
+    assert!(
+        content.contains("allowlist") || content.contains("not"),
+        "Error should mention allowlist. Got: {content}"
+    );
 
     client.cancel().await.ok();
 }

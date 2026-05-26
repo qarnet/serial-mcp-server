@@ -28,6 +28,7 @@ use serde_json::Map;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use serial_mcp_server::security::SecurityManager;
 use serial_mcp_server::serial::ConnectionManager;
 use serial_mcp_server::SerialHandler;
 
@@ -51,6 +52,15 @@ impl TestServer {
     /// Useful when the test wants to insert a loopback connection before
     /// the server is up.
     pub async fn start_with(manager: Arc<ConnectionManager>) -> Self {
+        Self::start_with_and_security(manager, SecurityManager::default()).await
+    }
+
+    /// Start a server with a custom [`ConnectionManager`] and [`SecurityManager`].
+    /// The security manager's allowlist will govern `open` calls during the test.
+    pub async fn start_with_and_security(
+        manager: Arc<ConnectionManager>,
+        security: SecurityManager,
+    ) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let url = format!("http://{addr}/mcp");
@@ -60,9 +70,10 @@ impl TestServer {
         let shutdown_for_service = shutdown.child_token();
         let service = StreamableHttpService::new(
             move || {
-                Ok(SerialHandler::with_manager(Arc::clone(
-                    &manager_for_service,
-                )))
+                Ok(SerialHandler::with_manager_and_security(
+                    Arc::clone(&manager_for_service),
+                    security.clone(),
+                ))
             },
             LocalSessionManager::default().into(),
             StreamableHttpServerConfig::default().with_cancellation_token(shutdown_for_service),
