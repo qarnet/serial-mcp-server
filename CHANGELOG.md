@@ -72,9 +72,9 @@ prompts, streaming, task cancellation, and an HTTP transport.
 | After feature sprint G–K | 36 |
 | After MCP 2025-11-25 compliance sprint | 62 active + 3 ignored |
 
-## [0.2.2] — 2026-05-25
+## [0.2.2] — 2026-05-26
 
-MCP specification compliance audit fixes: pagination, resource metadata, dead-code removal, and comprehensive test coverage.
+MCP specification compliance audit fixes, input validation, tool schemas, race-condition fix, and comprehensive test coverage.
 
 ### Added
 
@@ -85,6 +85,11 @@ MCP specification compliance audit fixes: pagination, resource metadata, dead-co
 - **Resource `size` metadata** — `serial://ports` and `serial://connections` now include `size` field (port count and connection count respectively)
 - **Tool outputSchema verification test** — `tools::tests::verify_all_tool_schemas` confirms all 11 tools have auto-generated output schemas via rmcp macro
 - **Resource metadata to resource templates** — Connection templates now include `size` reflecting open connection count
+- **`src/limits.rs` module** — centralized MIN/MAX constants for all bounded tool inputs (`MAX_READ_BYTES`, `MAX_TIMEOUT_MS`, `MIN_POLL_INTERVAL_MS`, etc.)
+- **Minimum-bound validation** — `read.max_bytes`, `wait_for.max_bytes`, and `subscribe.max_chunk_bytes` now reject zero (must be ≥ 1)
+- **Schema constraints on tool args** — `duration_ms`, `timeout_ms`, `max_bytes`, `max_chunk_bytes`, and `poll_interval_ms` now advertise `minimum`/`maximum` in their JSON schemas via `schemars` helpers
+- **Integration test for validation limits** — HTTP-layer test verifying all bounded inputs return `isError: true` when out of range
+- **Cross-session subscribe test** — verifies closing a connection from one session stops the streaming task subscribed from another
 
 ### Changed
 
@@ -94,6 +99,7 @@ MCP specification compliance audit fixes: pagination, resource metadata, dead-co
   - `progressToken`: marked ✅ (was ❌, wired for read/wait_for/send_break)
   - `CancellationToken`: marked ✅ (was ❌, cooperative cancellation working)
   - Overall compliance score updated from ~70% to ~85%
+- **`StreamRegistry` made injectable** — HTTP transport now shares a single stream map across sessions (via `with_manager_security_and_streams`), preventing cross-session subscribe leaks
 
 ### Removed
 
@@ -103,6 +109,9 @@ MCP specification compliance audit fixes: pagination, resource metadata, dead-co
 ### Fixed
 
 - **Pagination compliance** — `next_cursor` now properly populated when more items remain, instead of always returning `None`
+- **Race condition in `ConnectionManager::open`** — added `opening_ports` set to prevent concurrent opens of the same physical port
+- **Peer disconnect handling in `stream_rx`** — background streaming task now breaks (rather than panicking) when the MCP peer disconnects
+- **Tool arg schemas** — `uint` fields (`duration_ms`, `max_bytes`, `max_chunk_bytes`, `timeout_ms`, `poll_interval_ms`) no longer emit the non-standard `"format": "uint"` keyword and include appropriate min/max bounds
 
 ## [0.2.1] — 2026-05-24
 
