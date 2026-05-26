@@ -2,14 +2,14 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum SerialError {
-    #[error("Connection failed: {0}")]
-    ConnectionFailed(String),
+    #[error("Failed to open port: {0}")]
+    OpenFailed(String),
 
-    #[error("Connection already exists: {0}")]
-    ConnectionExists(String),
+    #[error("Port already open: {0}")]
+    PortAlreadyOpen(String),
 
-    #[error("Invalid connection ID: {0}")]
-    InvalidConnection(String),
+    #[error("Connection not found: {0}")]
+    ConnectionNotFound(String),
 
     #[error("Invalid baud rate: {0}")]
     InvalidBaudRate(u32),
@@ -19,9 +19,12 @@ pub enum SerialError {
 
     #[error("I/O error: {0}")]
     IoError(#[from] std::io::Error),
-
-    #[error("Serial port error: {0}")]
-    SerialPortError(#[from] serialport::Error),
 }
 
 pub type Result<T> = std::result::Result<T, SerialError>;
+
+impl From<serialport::Error> for SerialError {
+    fn from(err: serialport::Error) -> Self {
+        SerialError::IoError(std::io::Error::other(err.to_string()))
+    }
+}

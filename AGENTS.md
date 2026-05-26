@@ -75,27 +75,26 @@ use crate::error::SerialError;
 **SerialError** (from `src/error.rs`):
 ```rust
 pub enum SerialError {
-    #[error("IO error: {0}")]
-    IoError(#[from] std::io::Error),
-    #[error("Read timeout")]
-    ReadTimeout,
-    #[error("Invalid baud rate: {0}")]
-    InvalidBaudRate(u32),
-    #[error("Port {0} is already open")]
+    #[error("Failed to open port: {0}")]
+    OpenFailed(String),
+    #[error("Port already open: {0}")]
     PortAlreadyOpen(String),
     #[error("Connection not found: {0}")]
     ConnectionNotFound(String),
-    #[error("Invalid argument: {0}")]
-    InvalidArgument(String),
+    #[error("Invalid baud rate: {0}")]
+    InvalidBaudRate(u32),
+    #[error("Read timeout")]
+    ReadTimeout,
+    #[error("I/O error: {0}")]
+    IoError(#[from] std::io::Error),
 }
 ```
 
 **Tool error helper:**
 ```rust
 fn log_tool_err<E: std::fmt::Display>(op: &str, context: &str, err: E) -> String {
-    let msg = format!("{op} failed — {context}: {err}");
-    error!("{msg}");
-    msg
+    error!("{op} failed: {err}");
+    format!("{context} - {err}")
 }
 ```
 

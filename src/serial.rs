@@ -377,7 +377,7 @@ fn build_stream(config: &ConnectionConfig) -> Result<SerialStream> {
         .parity(config.parity.into())
         .flow_control(config.flow_control.into())
         .open_native_async()
-        .map_err(|e| SerialError::ConnectionFailed(format!("{}: {}", config.port, e)))
+        .map_err(|e| SerialError::OpenFailed(format!("{}: {}", config.port, e)))
 }
 
 // ---- Multi-connection registry ----------------------------------------------
@@ -398,7 +398,7 @@ impl ConnectionManager {
     pub async fn open(&self, config: ConnectionConfig) -> Result<String> {
         let mut connections = self.connections.lock().await;
         if is_port_in_use(&connections, &config.port) {
-            return Err(SerialError::ConnectionExists(config.port));
+            return Err(SerialError::PortAlreadyOpen(config.port));
         }
         let connection = Arc::new(SerialConnection::open(config).await?);
         let id = connection.id().to_string();
@@ -415,7 +415,7 @@ impl ConnectionManager {
     pub async fn insert(&self, connection: SerialConnection) -> Result<String> {
         let mut connections = self.connections.lock().await;
         if is_port_in_use(&connections, connection.port()) {
-            return Err(SerialError::ConnectionExists(connection.port().to_string()));
+            return Err(SerialError::PortAlreadyOpen(connection.port().to_string()));
         }
         let id = connection.id().to_string();
         connections.insert(id.clone(), Arc::new(connection));
@@ -429,7 +429,7 @@ impl ConnectionManager {
             .lock()
             .await
             .remove(id)
-            .ok_or_else(|| SerialError::InvalidConnection(id.to_string()))?;
+            .ok_or_else(|| SerialError::ConnectionNotFound(id.to_string()))?;
         Ok(())
     }
 
@@ -440,7 +440,7 @@ impl ConnectionManager {
             .await
             .get(id)
             .cloned()
-            .ok_or_else(|| SerialError::InvalidConnection(id.to_string()))
+            .ok_or_else(|| SerialError::ConnectionNotFound(id.to_string()))
     }
 
     /// Number of currently open connections.
@@ -622,23 +622,23 @@ mod tests {
         mgr.insert(c1).await.unwrap();
         let (c2, _p2) = loopback_connection("port-a");
         let err = mgr.insert(c2).await.unwrap_err();
-        assert!(matches!(err, SerialError::ConnectionExists(_)));
+        assert!(matches!(err, SerialError::PortAlreadyOpen(_)));
     }
 
     #[tokio::test]
-    async fn manager_close_then_get_returns_invalid_connection() {
+    async fn manager_close_then_get_returns_connection_not_found() {
         let mgr = ConnectionManager::new();
         let (c, _p) = loopback_connection("port-z");
         let id = mgr.insert(c).await.unwrap();
         mgr.close(&id).await.unwrap();
         let err = mgr.get(&id).await.unwrap_err();
-        assert!(matches!(err, SerialError::InvalidConnection(_)));
+        assert!(matches!(err, SerialError::ConnectionNotFound(_)));
     }
 
     #[tokio::test]
-    async fn manager_get_unknown_id_returns_invalid_connection() {
+    async fn manager_get_unknown_id_returns_connection_not_found() {
         let mgr = ConnectionManager::new();
         let err = mgr.get("does-not-exist").await.unwrap_err();
-        assert!(matches!(err, SerialError::InvalidConnection(_)));
+        assert!(matches!(err, SerialError::ConnectionNotFound(_)));
     }
 }
