@@ -113,6 +113,95 @@ MCP specification compliance audit fixes, input validation, tool schemas, race-c
 - **Peer disconnect handling in `stream_rx`** — background streaming task now breaks (rather than panicking) when the MCP peer disconnects
 - **Tool arg schemas** — `uint` fields (`duration_ms`, `max_bytes`, `max_chunk_bytes`, `timeout_ms`, `poll_interval_ms`) no longer emit the non-standard `"format": "uint"` keyword and include appropriate min/max bounds
 
+## [0.2.6] — 2026-05-27
+
+Protocol emulator integration tests — a full ESP32 weather-station agent workflow and binary payload roundtrips via PTY. No hardware required.
+
+### Added
+
+- **`tests/protocol_emulator.rs`** — 13-stage MCP agent workflow simulating an ESP32 firmware device:
+  - `write` (AT commands, hex/base64 payloads), `read`, `wait_for` (prompts)
+  - `set_dtr_rts` (reset), `flush`, `subscribe`/`unsubscribe`
+  - Binary payload roundtrip (0x00–0xFF via hex and base64)
+  - Large payload test (>3 KB via hex-encoded `read`)
+  - `wait_for` with hex pattern `CAFEC0FFEE`
+  - All 11 tools + resources covered in a single hardware-free test
+- **`tests/protocol_emulator_binary.rs`** — focused binary encoding edge cases (hex/base64 roundtrips of all byte values, hex read for >3 KB, hex `wait_for` pattern match)
+- **`PtyPair::into_parts()`** in `tests/common/mod.rs` — splits PTY so emulator and client run in different async tasks
+- **`tests/common` test utilities** extended with `connect_client`, `tool_request`, `next_notification` helpers
+
+### Changed
+
+- PTY `set_dtr_rts` returns ENOTTY in kernel-dependent edge cases; tests handle gracefully instead of asserting success
+- PTY visibility in `list_ports` relaxed for kernel-variant behavior
+
+### Test count: 157 (2 hardware-ignored)
+
+| Layer | Count |
+|---|---|
+| Unit tests | 51 |
+| HTTP integration | 26 |
+| PTY integration | 7 |
+| Proptest | 54 |
+| Allowlist | 5 |
+| Resource subscriptions | 2 |
+| Protocol emulator | 1 |
+| Binary payload emulator | 1 |
+| Blob resources | 2 |
+| Hardware (ignored) | 2 |
+
+---
+
+## [0.2.5] — 2026-05-27
+
+Property-based testing, fuzz targets, and lifecycle tests.
+
+### Added
+
+- **Proptest property tests** (`tests/proptest.rs`, 54 strategies):
+  - Tool arg roundtrips (`open`, `read`, `write`, `flush`, `set_dtr_rts`, `send_break`, `subscribe`, `unsubscribe`, `wait_for`)
+  - Result type schemas (all 11 result types validated via `jsonschema`)
+  - Encoding roundtrips (hex, base64, utf8 edge cases)
+  - Lifecycle sequencing (`open`→`write`→`close`, double-close, read-after-close, write-after-close, subscribe-then-close)
+  - Bound validation (`clamp_or_err`, `clamp_timeout_or_err`, `clamp_poll_interval_or_err`, `require_min_or_err`)
+  - Port name escaping (special characters in port names)
+- **cargo-fuzz targets** (3 harnesses in `fuzz/`):
+  - `fuzz_open_args` — random `Open` tool arguments validated with `open_args_parsed_strictly`
+  - `fuzz_codec` — random hex/base64 strings into `Encoding::decode`
+  - `fuzz_read` — random bytes decoded across all three encodings and validated via `jsonschema`
+- **`tests/allowlist.rs`** (5 tests) — authorization, glob patterns, comma-separated lists
+- **Lifecycle smoke tests** (in proptest) — `open`→`write`→`read`→`close` pipeline verified in-memory
+- **`tests/serial_pty.rs`** PTY test additions: `pty_wait_for_matches_real_serial_pattern`
+
+### Changed
+
+- `SerialIo` trait updated to support `tokio_serial::SerialStream` and PTY backends uniformly
+- `BreakResetGuard` made robust with `AtomicBool` and `try_current()` cleanup
+
+---
+
+## [0.2.4] — 2026-05-27
+
+Fix for MCP tool schema strictness — optional fields must serialize as `null`, not omitted.
+
+### Fixed
+
+- **Schema fix**: Removed `skip_serializing_if` on optional fields in `PortInfo.hardware_id`. Some MCP clients reject schemas with missing optional fields.
+- Subscribe `timeout_ms` now serializes as `null` when absent (previously omitted entirely), matching `wait_for` behavior
+
+---
+
+## [0.2.3] — 2026-05-26
+
+Subscribe gains a synchronous blocking mode for agents that prefer pull over push.
+
+### Added
+
+- **`subscribe(timeout_ms)`** — when `timeout_ms` is provided, `subscribe` blocks until the timeout expires and returns all accumulated data as a single `SubscribeResult`. Falls back to the existing fire-and-forget mode when absent.
+- **Documentation**: `SPECIFICATION_COMPLIANCE.md` updated with corrected MCP 2025-11-25 scores
+
+---
+
 ## [0.2.1] — 2026-05-24
 
 MCP 2025-11-25 compliance, CDC-ACM hardware fixes, port allowlist, and comprehensive testing.
