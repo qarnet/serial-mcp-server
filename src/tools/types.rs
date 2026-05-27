@@ -184,16 +184,12 @@ pub struct SubscribeResult {
     pub poll_interval_ms: u64,
     pub replaced_previous: bool,
     /// Present only when timeout_ms was set. Contains all data accumulated
-    /// during the subscription window.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// during the subscription window. `null` in fire-and-forget mode.
     pub data: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub bytes_read: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub elapsed_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "crate::schema_helpers::option_uint_schema")]
     pub timeout_ms: Option<u64>,
 }
