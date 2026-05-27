@@ -275,5 +275,12 @@ pub mod pty {
         pub async fn read_device_exact(&mut self, dst: &mut [u8]) -> std::io::Result<()> {
             self.master.read_exact(dst).await.map(|_| ())
         }
+
+        /// Split the pair into its master file and slave fd so the
+        /// test can move the master into a spawned emulator task whilst
+        /// keeping the slave alive.
+        pub fn into_parts(self) -> (File, OwnedFd) {
+            (self.master, self._slave)
+        }
     }
 }

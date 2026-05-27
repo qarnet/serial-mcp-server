@@ -1,546 +1,394 @@
-# Serial MCP Server — Actionable Audit Plan
+# Protocol Emulator Test Plan
 
-**Date:** 2026-05-26
-**Audit basis:** Full repo audit at commit `8233e9e` (main).
-**Build state at audit:** `cargo fmt --check`, `cargo clippy -D warnings`,
-and `cargo test --all-targets` all pass clean (92 active tests + 3 ignored).
+## Goal
 
-This plan supersedes the previous "All Phases Complete (v0.2.2)" PLAN.md.
-Items are grouped by risk and ordered for execution. Each item lists:
-file/line anchors, the concrete fix, and the test that should accompany it.
+Add a single integration test (`protocol_emulator_workflow`) to
+`tests/protocol_emulator.rs` that simulates a full MCP agent session
+against a firmware-like PTY device emulator.  No physical hardware needed.
 
----
+## Overview
 
-## Suggested commit grouping
+The test creates a PTY pair, starts the real MCP server against the slave
+side, and runs a device-emulator task on the master side that responds to
+commands exactly like the ESP32 weather station firmware.  The test then
+drives all 11 MCP tools through the HTTP client in a realistic multi-step
+workflow — exactly the pattern an AI agent uses.
 
-1. **`fix: robustness — pagination panic, subscribe leak, input clamps`**
-   — items 1, 2, 5 (+ tests).
-2. **`fix: send_break timing precision for sub-250ms durations`** — item 3.
-3. **`docs: sync Cargo.toml version, AGENTS.md, PLAN status`** — items 8, 9, 10, 11.
-4. **`refactor: remove dead code (SerialPortError, latest_read, encoding_from_str)`**
-   — items 13, 14, 15.
-5. Remaining items (4, 6, 7, 12, 16–23) can ship opportunistically.
+### Architecture
 
-CI must stay green after each commit: `cargo fmt --all -- --check`,
-`cargo clippy --all-targets --locked -- -D warnings`, `cargo test --all-targets --locked`.
-
----
-
-## P0 — Bugs that crash or leak
-
-### 1. `paginate` panics on out-of-range cursor
-
-**File:** `src/server.rs:32-55`
-
-A client-supplied cursor encoding `offset > all.len()` produces an
-inverted slice range `all[offset..all.len()]` → panic. With at most 2
-static resources today this trivially crashes any session that sends
-`cursor = base64("999")`. `offset + page_size` can also overflow `usize`.
-
-**Fix:**
-
-```rust
-let offset = cursor
-    .as_deref()
-    .and_then(|c| base64::engine::general_purpose::STANDARD.decode(c).ok())
-    .and_then(|b| String::from_utf8(b).ok())
-    .and_then(|s| s.parse::<usize>().ok())
-    .unwrap_or(0)
-    .min(all.len());                              // clamp offset
-let end = offset.saturating_add(page_size).min(all.len());  // saturating add
-let items = all[offset..end].to_vec();
+```
+┌──────────────┐   HTTP    ┌──────────────┐  PTY slave   ┌─────────────────┐
+│  MCP client  │◄─────────►│ MCP server   │◄────────────►│ Device emulator  │
+│  (test code) │  tools/   │ (axum HTTP)  │tokio_serial  │ (tokio task)    │
+│              │  resources│              │              │ Reads commands,  │
+└──────────────┘           └──────────────┘              │ writes responses │
+                                                         └─────────────────┘
 ```
 
-**Test:** add `paginate_handles_offset_past_end_without_panic` in
-`src/server.rs#tests` exercising offsets of `0`, `len()`, `len()+1`,
-and `usize::MAX`. Also add an HTTP integration test that sends a
-crafted cursor and asserts the server doesn't 500.
+### Device emulator specification
 
----
+The emulator must implement the ESP32 weather-station serial protocol
+exactly as specified in:
+- `~/repos/MC-ESP-Klimastation/AGENTS.md` lines 539–561
+- `~/repos/serial-mcp-server/tests/common/mod.rs` lines 225–278 (PTY utilities)
 
-### 2. `subscribe` task is not cleaned up on `close`
-
-**Files:** `src/tools/stream_ops.rs`, `src/tools/port_ops.rs:53`, `src/server.rs:124`
-
-`close` removes the connection from `ConnectionManager`, but
-`SerialHandler::streams` still owns a `StreamHandle` whose `stream_rx`
-task holds an `Arc<SerialConnection>`. Consequences:
-
-- The underlying serial port stays open until the stream task exits
-  (drop only fires on `unsubscribe` or `SerialHandler` drop).
-- The stream task keeps polling the dead fd, burning CPU and spamming
-  `error!("RX stream read error…")` logs.
-- `connections.list_open()` reports closed while the stream may still
-  push notifications — inconsistent client view.
-
-**Fix:** in `SerialHandler::close` (server.rs), after a successful
-`port_ops::close`, also remove the entry from `self.streams`. The
-existing `StreamHandle::Drop` will then abort the task.
-
-```rust
-async fn close(&self, ...) -> Result<Json<CloseResult>, String> {
-    let connection_id = args.connection_id.clone();
-    let result = port_ops::close(&self.connections, args).await?;
-    // Abort any active RX subscription tied to this connection.
-    self.streams.lock().await.remove(&connection_id);
-    self.notify_resource_changed(&connection_id, &ctx).await;
-    Ok(result)
-}
+Commands:
+```
+READ KV\r\n    → D=26.05.2026T23:19:02 T=26.75 H=53.30 P=980.9 C=409 V=1\r\n
+READ CSV\r\n   → 26.05.2026T23:19:02;26.75;53.30;980.9;409;1\r\n
+READ FL\r\n    → 26.05.2026T23:19:02  26.75  53.30  980.9   409    1\r\n
+READ\r\n       → same as KV (default format)
+READ   KV\r\n  → same as KV (extra whitespace — firmware strips it)
+READ GARBAGE\r\n → no response (firmware ignores invalid format)
+<garbage>\r\n  → no response (firmware checks line starts with READ)
 ```
 
-**Test:** extend `tests/http_integration.rs` with
-`subscribe_then_close_stops_streaming_task`: open → subscribe → close
-→ assert no further `notifications/message` arrive within 200ms and
-the `connections` resource shows zero open connections.
+Behavioral details (from `~/repos/MC-ESP-Klimastation/src/Interaction/UsbSerial/SerialReceiver.cpp`):
+- Lines terminated by `\n`, with optional `\r` stripped.
+- Requires at least 4 characters starting with `READ`.
+- Skips an optional space after `READ` before parsing format.
+- KV, CSV, FL are the three recognized formats.
+- Empty format string uses the default (KV).
+- Invalid formats are silently ignored (returns false from parseLine, no response).
 
----
-
-### 5. No upper bound on `max_bytes` / `max_chunk_bytes` — memory DoS
-
-**Files:** `src/tools/helpers.rs:61,167,270`, `src/tools/types.rs`
-
-`read`, `wait_for`, `subscribe` all do `vec![0u8; max_bytes]` where
-`max_bytes: usize` is unvalidated client input. `max_bytes = usize::MAX`
-OOM-kills the server. `subscribe.poll_interval_ms = 0` makes `stream_rx`
-a tight CPU loop.
-
-**Fix:** add a single validation helper in `src/tools/helpers.rs`:
-
+Emulator task pseudocode:
 ```rust
-pub const MAX_READ_BYTES: usize = 1024 * 1024;       // 1 MiB
-pub const MAX_WAIT_BYTES: usize = 1024 * 1024;       // 1 MiB
-pub const MAX_STREAM_CHUNK_BYTES: usize = 64 * 1024; // 64 KiB
-pub const MAX_TIMEOUT_MS: u64 = 5 * 60 * 1000;       // 5 min
-pub const MIN_POLL_INTERVAL_MS: u64 = 10;
-pub const MAX_WRITE_BYTES: usize = 1024 * 1024;      // 1 MiB
-
-pub fn clamp_or_err(name: &str, value: usize, max: usize) -> Result<usize, String> {
-    if value > max {
-        Err(format!("{name}={value} exceeds maximum {max}"))
-    } else { Ok(value) }
-}
-```
-
-Wire into each tool handler before allocation. Return a tool-level error
-(`CallToolResult{is_error}`) rather than truncating silently.
-
-| Tool | Field | Cap |
-|---|---|---|
-| `read` | `max_bytes` | 1 MiB |
-| `wait_for` | `max_bytes` | 1 MiB |
-| `subscribe` | `max_chunk_bytes` | 64 KiB |
-| `subscribe` | `poll_interval_ms` | min 10ms |
-| `read` / `wait_for` / `send_break` | `timeout_ms` / `duration_ms` | 5 min |
-| `write` | decoded `data.len()` | 1 MiB |
-
-Also reflect caps in the JSON schemas via `schemars` `range(max = …)`
-where straightforward.
-
-**Test:** unit tests asserting `is_error=true` for each over-limit input,
-plus one that confirms `subscribe(poll_interval_ms=0)` is rejected.
-
----
-
-## P1 — Bugs that misbehave but don't crash
-
-### 3. `send_break` overshoots short durations
-
-**File:** `src/tools/control_ops.rs:104-126`
-
-`tokio::time::interval(Duration::from_millis(250))` ticks at t≈0, 250,
-500…. The break-release check only runs on tick. With `duration_ms < 250`
-the break is held until the next tick at 250ms — a requested 50ms BREAK
-becomes ~250ms, significant for some legacy targets.
-
-**Fix:** decouple the deadline from the progress ticker. Sleep to the
-deadline, race against cancellation, and emit progress on a separate
-interval that doesn't gate release.
-
-```rust
-let deadline = start + Duration::from_millis(args.duration_ms);
-let mut progress_ticker = tokio::time::interval(Duration::from_millis(250));
-progress_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-loop {
-    tokio::select! {
-        _ = ct.cancelled() => return Err("Cancelled".into()),
-        _ = tokio::time::sleep_until(deadline) => break,
-        _ = progress_ticker.tick() => {
-            // emit progress (omit on first tick to avoid t=0 redundant emit)
-            ...
+async fn emulator_task(mut pty: PtyPair) {
+    let mut buf = vec![0u8; 256];
+    let mut pos = 0usize;
+    loop {
+        let n = pty.master.read(&mut buf[pos..]).await?;
+        if n == 0 { break; }  // PTY closed
+        pos += n;
+        // Process complete lines
+        while let Some(line_end) = buf[..pos].iter().position(|&b| b == b'\n') {
+            let mut line = buf[..line_end].to_vec();
+            // Strip trailing \r
+            if line.last() == Some(&b'\r') { line.pop(); }
+            let response = match parse_command(&line) {
+                Some(fmt) => format_response(fmt, get_sensor_values()),
+                None => continue,  // unrecognized — no response
+            };
+            pty.master.write_all(response.as_bytes()).await?;
+            // Remove processed bytes
+            let consumed = line_end + 1;
+            buf.copy_within(consumed..pos, 0);
+            pos -= consumed;
         }
     }
 }
 ```
 
-**Test:** PTY test `send_break_50ms_releases_within_100ms` measuring
-elapsed wall-clock and asserting `actual_duration_ms ∈ [40, 100]`.
+Sensor values returned (use static values — the test asserts on them):
+```
+Date:   26.05.2026 23:19:02
+Temp:   26.75
+Hum:    53.30
+Press:  980.9
+eCO2:   409
+VCC:    1
+```
 
----
+Format responses:
 
-### 4. `BreakResetGuard::drop` spawns on a possibly-dead runtime
+| Format | Template | Raw bytes |
+|--------|----------|-----------|
+| KV | `D=26.05.2026T23:19:02 T=26.75 H=53.30 P=980.9 C=409 V=1` | `D=26.05.2026T23:19:02 T=26.75 H=53.30 P=980.9 C=409 V=1\r\n` |
+| CSV | `26.05.2026T23:19:02;26.75;53.30;980.9;409;1` | `26.05.2026T23:19:02;26.75;53.30;980.9;409;1\r\n` |
+| FL | `26.05.2026T23:19:02  26.75  53.30  980.9   409    1` | `26.05.2026T23:19:02  26.75  53.30  980.9   409    1\r\n` |
 
-**File:** `src/tools/control_ops.rs:60-81`
+## MCP tool workflow
 
-`tokio::spawn` inside `Drop` panics if no current runtime, which can
-happen during shutdown. Separately, `Cell<bool>` makes the future
-`!Send` — currently tolerated by rmcp but fragile.
+The test uses the existing HTTP test harness:
+- `TestServer::start()` from `tests/common/mod.rs` line 49
+- `connect_client()` from `tests/common/mod.rs` line 132
+- `tool_request()` / `args_object()` from `tests/common/mod.rs` lines 195–205
+- `PtyPair::open()` from `tests/common/mod.rs` line 247
+- `next_notification()` from `tests/common/mod.rs` line 208
 
-**Fix:**
+### Workflow stages:
+
+**Stage 0: Set up**
+1. Open `PtyPair` (creates `/dev/pts/N` master+slave).
+2. Spawn the device emulator task on the PTY master.
+3. Start `TestServer` and connect `rmcp` HTTP client.
+4. Call `open` tool on the PTY slave path at 115200 baud (baud rate is ignored
+   on PTY, pick any valid value).  Extract `connection_id` from result.
+
+**Stage 1: list_ports**
+- Call `list_ports` tool.
+- Assert `count >= 1` and the response includes a port with `name` matching
+  the PTY slave path.
+
+**Stage 2: write + subscribe (blocking mode) ← the core feature**
+- Call `flush(connection_id, target="input")` to discard any startup noise.
+- Call `write(connection_id, data="READ KV\r\n", encoding="utf8")`.
+  Assert `bytes_written >= 9`.
+- Call `subscribe(connection_id, timeout_ms=3000, encoding="utf8")`.
+  Assert `isError == false`, `data` is not null.
+- Assert `data` contains `T=26.75`, `H=53.30`, `P=980.9`, `C=409`.
+- Assert `bytes_read > 0`, `elapsed_ms > 0`, `timeout_ms == 3000`.
+
+**Stage 3: write + read (standard read)**
+- Call `flush(connection_id, target="input")`.
+- Call `write(connection_id, data="READ CSV\r\n", encoding="utf8")`.
+- Call `read(connection_id, timeout_ms=2000, encoding="utf8")`.
+- Assert `data` contains `26.75;53.30;980.9;409` (semicolon-separated).
+- Assert `elapsed_ms` is present.
+
+**Stage 4: write hex-encoded command + read hex response**
+- Call `flush(connection_id, target="input")`.
+- Call `write(connection_id, data="52 45 41 44 20 4b 56 0d 0a", encoding="hex")`
+  (this is "READ KV\r\n" in hex).
+- Call `read(connection_id, timeout_ms=2000, encoding="hex")`.
+- Assert response decoded back to UTF-8 contains `T=26.75`.
+
+**Stage 5: wait_for (pattern match)**
+- Call `flush(connection_id, target="input")`.
+- Spawn background write of `READ KV\r\n` (100ms delay), then:
+- Call `wait_for(connection_id, pattern="T=", timeout_ms=5000, max_bytes=1024)`.
+- Assert `matched == true`, `match_index` is `Some`.
+- Assert `data` contains `T=26.75`.
+
+**Stage 6: wait_for timeout (no data scenario)**
+- Call `flush(connection_id, target="input")`.
+- Call `wait_for(connection_id, pattern="IMPOSSIBLE", timeout_ms=100, max_bytes=64)`.
+- Assert `isError == true`, text mentions "timed out".
+
+**Stage 7: subscribe fire-and-forget + notifications**
+- Call `subscribe(connection_id, poll_interval_ms=50)` (no `timeout_ms`).
+- Assert `data` is `null`, `bytes_read` is `null` — fire-and-forget mode.
+- Call `write(connection_id, data="READ KV\r\n", encoding="utf8")`.
+- Use `next_notification(rx, Duration::from_secs(2))` to capture the
+  MCP logging event that the background streamer emits.
+- Assert the notification's `data["data"]` contains `T=26.75`.
+
+**Stage 8: read timeout**
+- Call `flush(connection_id, target="input")`.
+- Write an invalid command: `write(connection_id, data="READ GARBAGE\r\n")`.
+  The emulator will not respond to this.
+- Call `read(connection_id, timeout_ms=300, max_bytes=64)`.
+- Assert `isError == true`, error mentions "timed out".
+
+**Stage 9: subscribe blocking empty data (valid command, fast timeout)**
+- Call `flush(connection_id, target="input")`.
+- Call `subscribe(connection_id, timeout_ms=300, encoding="utf8")`.
+  No command was written yet, so the emulator hasn't sent anything.
+- Assert `isError == false` (subscribe doesn't error on empty read — it
+  just returns whatever it collected, which may be empty).
+- Assert `bytes_read` is 0 (or absent / null).
+
+**Stage 10: flushes, set_dtr_rts, send_break, unsubscribe**
+- Call `flush(connection_id, target="output")` — assert success.
+- Call `flush(connection_id, target="both")` — assert success.
+- Call `set_dtr_rts(connection_id, dtr=true, rts=false)` — assert `dtr` and `rts`
+  fields match.
+- Call `send_break(connection_id, duration_ms=30)` — assert `actual_duration_ms`
+  is present and `>= 30`.
+- Call `subscribe(connection_id, poll_interval_ms=50)` — subscribe again.
+- Call `unsubscribe(connection_id)` — assert `was_active == true`.
+- Call `unsubscribe(connection_id)` again — assert `was_active == false`.
+
+**Stage 11: resources**
+- Call `read_resource("serial://ports")` — assert JSON content includes the
+  PTY slave path.
+- Call `read_resource("serial://connections")` — assert JSON content includes
+  the connection_id.
+- Call `read_resource("serial://connections/{connection_id}")` — assert JSON
+  includes `port` field matching slave path.
+
+**Stage 12: close**
+- Call `close(connection_id)` — assert success.
+- Call `read(connection_id, ...)` — assert `isError == true` (closed conn).
+
+**Stage 13: cleanup**
+- `client.cancel().await.ok()` plus TestServer `Drop` plus PtyPair `Drop`
+  handles all cleanup.
+
+## Implementation details
+
+### File to create
+
+`tests/protocol_emulator.rs` (name must match the convention of other test
+files — this will be discovered by `cargo test` automatically).
+
+### Imports needed
+
+All from `tests/common/mod.rs`:
+- `TestServer`, `connect_client`, `tool_request`, `args_object`, `next_notification`
+- `PtyPair` (under `common::pty`)
+
+From `rmcp::model`:
+- `CallToolRequestParams`, `ReadResourceRequestParams`
+
+From `serde_json`:
+- `json`
+
+### Important: don't use `#[cfg(target_os = "linux")]`
+
+The test file should have the standard `#![cfg(target_os = "linux")]` attribute
+at the top since it uses `openpty(3)`.
+
+### The emulator task
+
+The emulator must be spawned as a `tokio::spawn` before the server starts.
+It takes ownership of the `PtyPair` and runs for the lifetime of the test.
+The task ends when the PTY master is dropped (read returns 0).
+
+Don't leak the task — the `PtyPair` owns the master fd, so when the test
+function returns and drops the TestServer, the PtyPair is dropped, the
+master fd closes, and the emulator task's `read` returns 0, terminating
+naturally.
+
+The emulator uses `tokio::fs::File` reads (from the PTY master's tokio
+File handle from `PtyPair`).  Since `PtyPair.master` is private, the
+emulator will need a helper:
 
 ```rust
-use std::sync::atomic::{AtomicBool, Ordering};
+// In tests/common/mod.rs, add to impl PtyPair:
+pub fn into_master(self) -> tokio::fs::File {
+    self.master
+}
+```
 
-struct BreakResetGuard {
-    connection: Arc<SerialConnection>,
-    disarmed: AtomicBool,
+Actually, the existing `PtyPair::write_device` and `read_device` are
+sufficient.  But for the emulator task's blocking read loop, we need
+direct access to the master.  The cleanest approach is to move the master
+out of the PtyPair and drop the rest.
+
+**Better approach: split the PtyPair**
+
+```rust
+async fn emulator_task(mut master: tokio::fs::File) {
+    // ... read loop ...
 }
 
-impl Drop for BreakResetGuard {
-    fn drop(&mut self) {
-        if self.disarmed.load(Ordering::Relaxed) { return; }
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            let connection = Arc::clone(&self.connection);
-            handle.spawn(async move {
-                let _ = connection.set_break_state(false).await;
-            });
+// In the test:
+let pty = PtyPair::open().expect("openpty");
+let slave_path = pty.slave_path.to_string_lossy().into_owned();
+let (master, slave_fd) = pty.into_parts();  // splits into master File + OwnedFd
+tokio::spawn(emulator_task(master));
+
+// Keep slave_fd alive (it's the _slave field from PtyPair)
+```
+
+This needs a new method on PtyPair:
+
+```rust
+pub fn into_parts(self) -> (tokio::fs::File, OwnedFd) {
+    (self.master, self._slave)
+}
+```
+
+Add this to `tests/common/mod.rs` in the `impl PtyPair` block, between
+`read_device_exact` and the closing `}`.
+
+### Response format helper
+
+```rust
+struct SensorSnapshot {
+    date: &'static str,  // "26.05.2026T23:19:02"
+    temp: f64,           // 26.75
+    hum: f64,            // 53.30
+    press: f64,          // 980.9
+    co2: u32,            // 409
+    vcc: u8,             // 1
+}
+
+fn format_kv(s: &SensorSnapshot) -> String {
+    format!("D={} T={:.2} H={:.2} P={:.1} C={} V={}\r\n",
+        s.date, s.temp, s.hum, s.press, s.co2, s.vcc)
+}
+
+fn format_csv(s: &SensorSnapshot) -> String {
+    format!("{};{:.2};{:.2};{:.1};{};{}\r\n",
+        s.date, s.temp, s.hum, s.press, s.co2, s.vcc)
+}
+
+fn format_fl(s: &SensorSnapshot) -> String {
+    format!("{}  {:.2}  {:.2}  {:.1}   {}    {}\r\n",
+        s.date, s.temp, s.hum, s.press, s.co2, s.vcc)
+}
+```
+
+### Command parser
+
+```rust
+enum Format { KV, CSV, FL }
+
+fn parse_command(line: &[u8]) -> Option<Format> {
+    let line = std::str::from_utf8(line).ok()?;
+    if line.len() < 4 || !line.starts_with("READ") { return None; }
+    let rest = &line[4..];
+    let format_str = rest.trim_start(); // skip optional spaces
+    match format_str {
+        "KV" => Some(Format::KV),
+        "CSV" => Some(Format::CSV),
+        "FL" => Some(Format::FL),
+        "" => Some(Format::KV),   // default format
+        _ => None,                // unknown — no response
+    }
+}
+```
+
+### Full emulator task
+
+```rust
+async fn emulator_task(mut master: tokio::fs::File) {
+    let snapshot = SensorSnapshot {
+        date: "26.05.2026T23:19:02", temp: 26.75, hum: 53.30,
+        press: 980.9, co2: 409, vcc: 1,
+    };
+    let mut buf = vec![0u8; 256];
+    let mut pos: usize = 0;
+    loop {
+        let n = match master.read(&mut buf[pos..]).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        pos += n;
+        while let Some(nl) = buf[..pos].iter().position(|&b| b == b'\n') {
+            let line = &buf[..nl];
+            let line = if line.last() == Some(&b'\r') { &line[..line.len()-1] } else { line };
+            if let Some(fmt) = parse_command(line) {
+                let resp = match fmt {
+                    Format::KV  => format_kv(&snapshot),
+                    Format::CSV => format_csv(&snapshot),
+                    Format::FL  => format_fl(&snapshot),
+                };
+                let _ = master.write_all(resp.as_bytes()).await;
+            }
+            let consumed = nl + 1;
+            buf.copy_within(consumed..pos, 0);
+            pos -= consumed;
         }
     }
 }
 ```
 
-**Test:** existing tests cover the happy path; add a unit test that
-constructs and drops the guard with `disarmed=false` inside a
-`tokio::runtime::Builder::new_current_thread().build()` and verifies
-no panic.
-
----
-
-### 6. `stream_rx` silently drops bytes on encoding failure
-
-**File:** `src/tools/helpers.rs:276-279`
-
-```rust
-let encoded = match codec::encode(encoding, chunk) {
-    Ok(s) => s,
-    Err(_) => continue,           // bytes lost without trace
-};
-```
-
-Hits in practice whenever a UTF-8 subscriber joins mid-frame on a binary
-stream. Client sees a gap with no signal.
-
-**Fix:** log a warning *and* emit a structured notification so the
-client can react:
-
-```rust
-Err(e) => {
-    warn!("RX encoding error on {}: dropped {} bytes", connection.id(), chunk.len());
-    let payload = serde_json::json!({
-        "connection_id": connection.id(),
-        "encoding_error": true,
-        "encoding": encoding.to_string(),
-        "bytes_dropped": chunk.len(),
-        "reason": e.to_string(),
-    });
-    let _ = peer.notify_logging_message(LoggingMessageNotificationParam {
-        level: LoggingLevel::Warning,
-        logger: Some(logger.clone()),
-        data: payload,
-    }).await;
-    continue;
-}
-```
-
-**Test:** PTY test that opens with `encoding="utf8"`, pushes
-`\xFF\xFE` from the device side, and asserts a `Warning`-level
-notification with `encoding_error: true` arrives.
-
----
-
-### 7. `notify_resource_list_changed` fires unconditionally
-
-**File:** `src/server.rs:298-317`
-
-Cheap, but emits on every open/close regardless of subscribers. Spec-
-compliant, just noisy. Acceptable to leave as-is; document in a
-comment that the `subscribers` map is only consulted for
-`resources/updated`, not for `resources/list_changed`.
-
-**Action:** add a clarifying comment. No code change required.
-
----
-
-## P2 — Documentation drift
-
-### 8. `Cargo.toml` version is `0.2.0`, docs reference `0.2.2`
-
-**File:** `Cargo.toml:3`
-
-CHANGELOG.md has entries for `0.2.1` and `0.2.2`; old PLAN.md was
-labeled `v0.2.2`. Bump to `0.2.2` (or `0.2.3` if any P0 items above
-ship in this release).
-
-**Action:** edit `Cargo.toml`, regenerate `Cargo.lock`, verify the
-description string still matches feature set ("11 tools").
-
----
-
-### 9. `AGENTS.md` documents a `SerialError` enum that doesn't match the code
-
-**Files:** `AGENTS.md` (Error Handling section), `src/error.rs`
-
-`AGENTS.md` lists: `IoError`, `ReadTimeout`, `InvalidBaudRate`,
-`PortAlreadyOpen`, `ConnectionNotFound`, `InvalidArgument`.
-
-Actual `src/error.rs`: `ConnectionFailed`, `ConnectionExists`,
-`InvalidConnection`, `InvalidBaudRate`, `ReadTimeout`, `IoError`,
-`SerialPortError`.
-
-**Decision needed:** two equally-valid options.
-
-- **Option A (rename code to match docs):** more readable variant names.
-  - `ConnectionFailed` → `OpenFailed`
-  - `ConnectionExists` → `PortAlreadyOpen`
-  - `InvalidConnection` → `ConnectionNotFound`
-  - Add `InvalidArgument(String)` (currently inlined as `String` returns).
-  - Touch all `matches!(err, SerialError::…)` sites in tests.
-
-- **Option B (update docs to match code):** zero code churn. Replace the
-  `AGENTS.md` enum listing with the real variants from `src/error.rs`.
-
-**Recommendation:** Option A — the doc names are clearer
-(`ConnectionNotFound` vs `InvalidConnection` removes the "invalid in
-what way?" ambiguity), and the type is touched in only ~10 places.
-
----
-
-### 10. `AGENTS.md` shows wrong format for `log_tool_err`
-
-**File:** `AGENTS.md` (Error Handling section), `src/tools/helpers.rs:396`
-
-Docs claim `format!("{op} failed — {context}: {err}")`. Reality:
-
-```rust
-pub fn log_tool_err<E: std::fmt::Display>(op: &str, context: &str, err: E) -> String {
-    error!("{op} failed: {err}");
-    format!("{context} - {err}")
-}
-```
-
-**Action:** update `AGENTS.md` snippet to match real signature/output,
-or change `log_tool_err` to return the documented format. Recommend
-updating the doc (the code's split between log line and user-facing
-string is intentional — log keeps `op`, return value keeps `context`).
-
----
-
-### 11. `PLAN.md` test counts are stale
-
-**Old file:** "Total: 70 tests active, 2 ignored."
-**Actual current run:** 92 active + 3 ignored
-(46 unit + 22 http + 2 resource_sub + 5 allowlist + 6 pty + 3 stdio +
-2 blob + 2 hardware-loopback-ignored).
-
-**Action:** this is fixed by overwriting PLAN.md (you're reading the new
-one). Going forward, prefer not to commit a frozen test count — let
-CHANGELOG entries reference it instead.
-
----
-
-### 12. Repo-root dev journals are noisy
-
-**Files:** `STATUS.md`, `PLAN_SCHEMA_FORMAT_FIX.md`, `REVIEW.md`
-
-Read like internal AI scratch pads. Either move under `docs/` or delete.
-For a public-facing repo, the project root should be:
-
-```
-README.md  CHANGELOG.md  LICENSE  AGENTS.md  Cargo.toml  Cargo.lock  ...
-```
-
-**Action:** `git mv STATUS.md PLAN_SCHEMA_FORMAT_FIX.md REVIEW.md docs/`
-or delete the obsolete ones (the schema-format fix is already shipped
-per CHANGELOG).
-
----
-
-## P3 — Dead code
-
-### 13. `SerialError::SerialPortError(serialport::Error)` is unused
-
-**File:** `src/error.rs:23`
-
-No constructor anywhere — `build_stream` stringifies via
-`ConnectionFailed(format!(...))`. The `#[from]` impl is dead.
-
-**Action:** either remove the variant, or wire `build_stream` to
-return `SerialError::SerialPortError(e)` directly and let `Display`
-do the formatting. Remove is simplest.
-
----
-
-### 14. `ConnectionSummary::latest_read` is always `None`
-
-**Files:** `src/serial.rs:474`, `src/serial.rs:461`, `src/server.rs:508`
-
-The field is set to `None` everywhere it's constructed.
-
-**Decision:**
-
-- **Drop the field** (clean): remove from struct, update JSON schema.
-- **Populate it** (feature): add a ring buffer to `SerialConnection`
-  holding the last N bytes (base64-encoded on read), update on every
-  `read()` success. Useful for the `serial://connections` snapshot but
-  introduces extra locking.
-
-**Recommendation:** drop it now; reintroduce only when a use case
-appears.
-
----
-
-### 15. `tools::io_ops::encoding_from_str` has no callers
-
-**File:** `src/tools/io_ops.rs:88-90`
-
-Trivial wrapper around `parse_encoding`. Delete.
-
----
-
-## P4 — Smells / minor
-
-### 16. Resource templates: `/raw` vs JSON detail overlap
-
-**File:** `src/server.rs:425-462`, `src/resources/mod.rs:24`
-
-Both `serial://connections/{id}` and `serial://connections/{id}/raw`
-are advertised, the latter is a blob view. Fine to keep, but document
-that `/raw` *consumes* bytes from the connection (item 17 below).
-
----
-
-### 17. `read_resource` for `/raw` consumes bytes (races with `read`/`wait_for`/`subscribe`)
-
-**File:** `src/server.rs:516-532`
-
-`conn.read_latest(256)` blocks for ~100ms and consumes bytes from the
-device's read queue. Concurrent tool calls on the same id will see
-short reads.
-
-**Options:**
-
-- Document the consumption behavior in the resource description string.
-- Add a non-consuming snapshot via an internal ring buffer (ties to
-  item 14).
-
-**Recommendation:** documentation-only for now.
-
----
-
-### 18. `stream_rx` doesn't observe `CancellationToken`
-
-**File:** `src/tools/helpers.rs:262-302`
-
-Stopped only via `unsubscribe`, `Drop`, or peer disconnect. If/when
-`tasks/cancel` is wired to subscriptions, plumb a `ct: CancellationToken`
-through `subscribe` and `tokio::select!` it against `connection.read(...)`.
-
-**Action:** defer until `tasks/cancel` semantics for subscriptions
-are decided.
-
----
-
-### 19. `SecurityManager::from_env` re-runs per HTTP session
-
-**Files:** `src/bin/http.rs:48-56`, `src/server.rs:79`
-
-`LocalSessionManager` calls the factory closure per new session;
-`SerialHandler::with_manager()` re-reads `SERIAL_MCP_ALLOWLIST` each
-time, including emitting the `info!("Port allowlist active: …")`
-log line per session.
-
-**Fix:** in `src/bin/http.rs`, construct one `SecurityManager` and
-clone it into the closure:
-
-```rust
-let security = SecurityManager::from_env();
-let manager_for_service = Arc::clone(&manager);
-let service = StreamableHttpService::new(
-    move || Ok(SerialHandler::with_manager_and_security(
-        Arc::clone(&manager_for_service),
-        security.clone(),
-    )),
-    ...
-);
-```
-
----
-
-### 20. `examples/STM32_demo/Cargo.lock` is modified but uncommitted
-
-**File:** `examples/STM32_demo/Cargo.lock`
-
-`git status` flags this. Either commit the regenerated lockfile or
-revert it.
-
-**Action:** decide based on whether the example was intentionally
-rebuilt. If not intentional, `git checkout examples/STM32_demo/Cargo.lock`.
-
----
-
-### 21. `.vscode/` shared settings — audit for personal paths
-
-**File:** `.gitignore:4-6` allowlists `.vscode/extensions.json` and
-`.vscode/settings.json`.
-
-**Action:** spot-check both files for absolute paths or local env hints
-before any open-source release.
-
----
-
-### 22. `write` tool has no payload size cap
-
-**File:** `src/tools/io_ops.rs:13-37`
-
-Already partially covered by item 5. Add `MAX_WRITE_BYTES = 1 MiB`
-check on the *decoded* byte length (after `codec::decode`), since hex
-input is 2x size of bytes and base64 is 4/3x.
-
----
-
-### 23. `progress_token.clone()` per loop iteration
-
-**Files:** `src/tools/helpers.rs:89,122,209`
-
-`ProgressToken` clones may allocate. Hoist `let token = progress_token.clone();`
-outside the loop, or take `&ProgressToken`.
-
-**Action:** micro-optimization; verify with `cargo expand` whether
-`ProgressToken::clone` is cheap (it likely wraps an `Arc<str>` or
-`String`). Defer unless a profiling pass flags it.
-
----
-
-## Out of scope (deferred)
-
-- **Cross-process port locking** (advisory flock per port) — was listed
-  as Phase 5 in the old PLAN.md, still not implemented, low priority.
-- **`serial://connections/{id}/stats` resource** — bytes sent/received
-  counters per connection. Also Phase 5 carry-over.
-- **`tasks/cancel` for subscriptions** — relates to item 18.
-
----
-
-## Verification gate for the whole plan
-
-Each commit must keep CI green:
+## Existing tests to reference
+
+- `tests/serial_pty.rs:25` — `setup()` function that opens PTY + starts server + calls `open` tool.  This is the exact pattern to follow.
+- `tests/serial_pty.rs:114` — `pty_subscribe_streams_device_writes_as_notifications` — subscribe + write + notification capture pattern.
+- `tests/serial_pty.rs:157` — `pty_wait_for_matches_real_serial_pattern` — wait_for usage with PTY.
+- `tests/http_integration.rs:396` — `subscribe_with_timeout_collects_and_returns_data` — blocking subscribe test pattern.
+- `tests/http_integration.rs:433` — `subscribe_without_timeout_is_fire_and_forget` — fire-and-forget test pattern.
+
+## How to run
 
 ```bash
-cargo fmt --all -- --check
-cargo build --all-targets --locked
-cargo test --all-targets --locked
-cargo clippy --all-targets --locked -- -D warnings
+cargo test --test protocol_emulator
 ```
 
-Hardware-gated tests (`SERIAL_MCP_TEST_PORT=…`) are not part of the
-gate but should be re-run locally before tagging a release.
+Must pass on Linux (PTY support via `nix` crate).
+
+## What this catches that existing tests don't
+
+1. **Multi-tool workflow**: Tests tool chaining (`open → write → subscribe → write → read → write → wait_for → close`) in a single session.
+2. **Real protocol interaction**: The emulator implements the actual ESP32 firmware parsing logic, testing that the MCP server correctly handles command/response sequences.
+3. **subscribe timing**: Tests that the blocking subscribe mode captures data that arrives mid-window (the key bug we fixed).
+4. **Invalid command handling**: Tests that commands the device ignores produce appropriate timeouts, not hung connections.
+5. **All three response formats**: KV, CSV, FL — validates each encoding path.
+6. **Hex encoding roundtrip**: Sends hex-encoded commands and receives hex-encoded responses.
+7. **Resource consistency**: Verifies resources list the correct port path after open.
+8. **Graceful cleanup**: close → read-after-close fails, unsubscribe → re-subscribe works.
