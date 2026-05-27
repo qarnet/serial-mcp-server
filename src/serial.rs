@@ -122,7 +122,6 @@ pub struct ConnectionConfig {
 pub struct PortInfo {
     pub name: String,
     pub description: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub hardware_id: Option<String>,
 }
 
