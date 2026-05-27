@@ -1,5 +1,10 @@
 # Code Review Walkthrough — `serial-mcp-server`
 
+> ⚠️ **Pegged to v0.2.1.** Newer files (e.g. `src/schema_helpers.rs`,
+> `tests/protocol_emulator.rs`, `tests/protocol_emulator_binary.rs`,
+> `tests/proptest.rs`, `tests/allowlist.rs`) are not covered below.
+> See CHANGELOG.md for v0.2.2+ additions.
+
 ## Context
 
 Reading guide for the v0.2.1 release, now that the MCP 2025-11-25 compliance
