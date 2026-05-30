@@ -4,10 +4,9 @@
     "serial": {
       "type": "stdio",
       "command": "/usr/local/bin/serial-mcp-server",
-      "env": {
-        "RUST_LOG": "warn",
-        "SERIAL_MCP_ALLOWLIST": "/dev/ttyACM*,/dev/ttyUSB*"
-      }
+      "args": [
+        "--allowlist=/dev/ttyACM*,/dev/ttyUSB*"
+      ]
     }
   }
 }

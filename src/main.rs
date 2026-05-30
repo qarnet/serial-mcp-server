@@ -12,9 +12,89 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 const DEFAULT_HTTP_BIND: &str = "127.0.0.1:8000";
-const ENV_HTTP_BIND: &str = "SERIAL_MCP_HTTP_BIND";
-const ENV_TRANSPORT: &str = "SERIAL_MCP_TRANSPORT";
 const MOUNT_PATH: &str = "/mcp";
+
+struct Args {
+    transport: Transport,
+    allowlist: Vec<String>,
+    bind: String,
+}
+
+enum Transport {
+    Stdio,
+    Http,
+}
+
+fn parse_args() -> Result<Args, pico_args::Error> {
+    let mut pargs = pico_args::Arguments::from_env();
+
+    if pargs.contains(["-h", "--help"]) {
+        print!(
+            "serial-mcp-server {version}
+
+Usage: serial-mcp-server [OPTIONS]
+
+Options:
+  --transport <stdio|http>   Transport to use (default: stdio)
+  --allowlist <patterns>     Comma-separated glob patterns for allowed ports
+                             (default: allow all)
+  --bind <addr>              HTTP bind address (default: {bind})
+  -h, --help                 Print this help
+
+Environment:
+  RUST_LOG                   Log level (error/warn/info/debug/trace)
+
+Examples:
+  serial-mcp-server --allowlist=/dev/ttyACM*,/dev/ttyUSB*
+  serial-mcp-server --transport=http --bind=0.0.0.0:8000
+",
+            version = env!("CARGO_PKG_VERSION"),
+            bind = DEFAULT_HTTP_BIND,
+        );
+        std::process::exit(0);
+    }
+
+    let transport_str: Option<String> = pargs.opt_value_from_str("--transport")?;
+    let transport = match transport_str.as_deref() {
+        Some("http") => Transport::Http,
+        Some("stdio") | None => Transport::Stdio,
+        Some(other) => {
+            eprintln!("error: unknown transport '{other}', expected 'stdio' or 'http'");
+            std::process::exit(1);
+        }
+    };
+
+    let allowlist_str: Option<String> = pargs.opt_value_from_str("--allowlist")?;
+    let allowlist = allowlist_str
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let bind = pargs
+        .opt_value_from_str("--bind")?
+        .unwrap_or_else(|| DEFAULT_HTTP_BIND.to_string());
+
+    let remaining = pargs.finish();
+    if !remaining.is_empty() {
+        eprintln!(
+            "error: unexpected arguments: {}",
+            remaining
+                .iter()
+                .map(|a| a.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        std::process::exit(1);
+    }
+
+    Ok(Args {
+        transport,
+        allowlist,
+        bind,
+    })
+}
 
 fn init_tracing() {
     tracing_subscriber::fmt()
@@ -26,27 +106,15 @@ fn init_tracing() {
         .init();
 }
 
-fn use_http_transport() -> bool {
-    let mut args = std::env::args().skip(1).peekable();
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--transport=http" => return true,
-            "--transport" => {
-                if args.next().map(|v| v == "http").unwrap_or(false) {
-                    return true;
-                }
-            }
-            _ => {}
-        }
-    }
-    std::env::var(ENV_TRANSPORT)
-        .map(|v| v == "http")
-        .unwrap_or(false)
-}
-
-async fn run_stdio() -> Result<(), Box<dyn std::error::Error>> {
+async fn run_stdio(security: SecurityManager) -> Result<(), Box<dyn std::error::Error>> {
     info!("Starting Serial MCP Server v{}", env!("CARGO_PKG_VERSION"));
-    let service = SerialHandler::new().serve(stdio()).await.map_err(|e| {
+    let service = SerialHandler::with_manager_and_security(
+        Arc::new(ConnectionManager::new()),
+        security,
+    )
+    .serve(stdio())
+    .await
+    .map_err(|e| {
         error!("Failed to start server: {:?}", e);
         e
     })?;
@@ -56,8 +124,10 @@ async fn run_stdio() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn run_http() -> Result<(), Box<dyn std::error::Error>> {
-    let bind = std::env::var(ENV_HTTP_BIND).unwrap_or_else(|_| DEFAULT_HTTP_BIND.to_string());
+async fn run_http(
+    security: SecurityManager,
+    bind: String,
+) -> Result<(), Box<dyn std::error::Error>> {
     info!(
         "Starting Serial MCP Server (HTTP) v{} on http://{}{}",
         env!("CARGO_PKG_VERSION"),
@@ -68,7 +138,6 @@ async fn run_http() -> Result<(), Box<dyn std::error::Error>> {
     let shutdown = tokio_util::sync::CancellationToken::new();
     let manager = Arc::new(ConnectionManager::new());
     let streams: StreamRegistry = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-    let security = SecurityManager::from_env();
     let manager_for_service = Arc::clone(&manager);
     let streams_for_service = Arc::clone(&streams);
 
@@ -106,10 +175,20 @@ async fn run_http() -> Result<(), Box<dyn std::error::Error>> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = match parse_args() {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    };
+
     init_tracing();
-    if use_http_transport() {
-        run_http().await
-    } else {
-        run_stdio().await
+
+    let security = SecurityManager::from_patterns(&args.allowlist);
+
+    match args.transport {
+        Transport::Http => run_http(security, args.bind).await,
+        Transport::Stdio => run_stdio(security).await,
     }
 }

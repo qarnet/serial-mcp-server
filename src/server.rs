@@ -70,7 +70,10 @@ pub struct SerialHandler {
 #[tool_router]
 impl SerialHandler {
     pub fn new() -> Self {
-        Self::with_manager(Arc::new(ConnectionManager::new()))
+        Self::with_manager_and_security(
+            Arc::new(ConnectionManager::new()),
+            SecurityManager::from_patterns::<[&str; 0]>([]),
+        )
     }
 
     /// Construct a handler with a caller-supplied [`ConnectionManager`].
@@ -79,7 +82,10 @@ impl SerialHandler {
     /// with a fake (in-memory) connection before exposing the handler over
     /// MCP, instead of going through the OS-level `open` path.
     pub fn with_manager(connections: Arc<ConnectionManager>) -> Self {
-        Self::with_manager_and_security(connections, SecurityManager::from_env())
+        Self::with_manager_and_security(
+            connections,
+            SecurityManager::from_patterns::<[&str; 0]>([]),
+        )
     }
 
     pub fn with_manager_and_security(

@@ -68,27 +68,31 @@ Quick example (Claude Code CLI, Linux/macOS):
   "mcpServers": {
     "serial": {
       "command": "/usr/local/bin/serial-mcp-server",
-      "env": { "SERIAL_MCP_ALLOWLIST": "/dev/ttyACM*,/dev/ttyUSB*" }
+      "args": ["--allowlist=/dev/ttyACM*,/dev/ttyUSB*"]
     }
   }
 }
 ```
 
-## Environment Variables
+## Options
 
-| Variable | Default | Description |
-|---|---|---|
-| `RUST_LOG` | `info` | Log level (`error` `warn` `info` `debug`) |
-| `SERIAL_MCP_ALLOWLIST` | *(empty = allow all)* | Comma-separated glob patterns for allowed ports |
-| `SERIAL_MCP_HTTP_BIND` | `127.0.0.1:8000` | HTTP transport bind address |
-| `SERIAL_MCP_TRANSPORT` | `stdio` | Transport: `stdio` or `http` |
+```
+serial-mcp-server [OPTIONS]
+
+  --transport <stdio|http>   Transport to use (default: stdio)
+  --allowlist <patterns>     Comma-separated glob patterns for allowed ports
+  --bind <addr>              HTTP bind address (default: 127.0.0.1:8000)
+  -h, --help                 Print help
+
+  RUST_LOG                   Log level env var (error/warn/info/debug/trace)
+```
 
 ## Transports
 
 | Mode | How to activate | Use case |
 |---|---|---|
 | stdio | default | Desktop agents |
-| HTTP | `--transport=http` or `SERIAL_MCP_TRANSPORT=http` | Remote / headless |
+| HTTP | `--transport=http` | Remote / headless |
 
 ## Supported Hardware
 

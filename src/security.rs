@@ -1,5 +1,5 @@
 use glob::Pattern;
-use tracing::{info, warn};
+use tracing::warn;
 
 /// Security manager that handles port allowlist checks.
 ///
@@ -10,12 +10,6 @@ pub struct SecurityManager {
 }
 
 impl SecurityManager {
-    /// Create a new security manager from the `SERIAL_MCP_ALLOWLIST` environment variable.
-    pub fn from_env() -> Self {
-        let allowlist = Self::parse_allowlist_env();
-        Self { allowlist }
-    }
-
     /// Create a security manager from explicit glob pattern strings.
     /// Invalid patterns are silently ignored (logged as warnings).
     pub fn from_patterns<I: IntoIterator>(patterns: I) -> Self
@@ -56,45 +50,6 @@ impl SecurityManager {
         }
     }
 
-    /// Parse `SERIAL_MCP_ALLOWLIST` environment variable into glob patterns.
-    /// Returns empty Vec if not set (allowing all ports).
-    fn parse_allowlist_env() -> Vec<Pattern> {
-        let env_val = std::env::var("SERIAL_MCP_ALLOWLIST").unwrap_or_default();
-        if env_val.is_empty() {
-            return Vec::new();
-        }
-
-        let patterns: Vec<Pattern> = env_val
-            .split(',')
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .filter_map(|s| match Pattern::new(s) {
-                Ok(p) => Some(p),
-                Err(e) => {
-                    warn!("Invalid allowlist pattern '{s}': {e}");
-                    None
-                }
-            })
-            .collect();
-
-        if !patterns.is_empty() {
-            info!(
-                "Port allowlist active: {}",
-                patterns
-                    .iter()
-                    .map(|p| p.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-        }
-        patterns
-    }
-}
-
-impl Default for SecurityManager {
-    fn default() -> Self {
-        Self::from_env()
-    }
 }
 
 #[cfg(test)]

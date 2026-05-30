@@ -20,10 +20,7 @@ Add to `.claude/settings.json` (project) or `~/.claude/settings.json` (global):
   "mcpServers": {
     "serial": {
       "command": "/usr/local/bin/serial-mcp-server",
-      "env": {
-        "RUST_LOG": "warn",
-        "SERIAL_MCP_ALLOWLIST": "/dev/ttyACM*,/dev/ttyUSB*"
-      }
+      "args": ["--allowlist=/dev/ttyACM*,/dev/ttyUSB*"]
     }
   }
 }
@@ -37,9 +34,7 @@ Add to `.claude/settings.json` (project) or `~/.claude/settings.json` (global):
   "mcpServers": {
     "serial": {
       "command": "C:\\Users\\<user>\\.cargo\\bin\\serial-mcp-server.exe",
-      "env": {
-        "SERIAL_MCP_ALLOWLIST": "COM3,COM4"
-      }
+      "args": ["--allowlist=COM3,COM4"]
     }
   }
 }
@@ -59,11 +54,7 @@ Config file location:
   "mcpServers": {
     "serial": {
       "command": "/usr/local/bin/serial-mcp-server",
-      "args": [],
-      "env": {
-        "RUST_LOG": "warn",
-        "SERIAL_MCP_ALLOWLIST": "/dev/ttyACM0"
-      }
+      "args": ["--allowlist=/dev/ttyACM0"]
     }
   }
 }
@@ -78,7 +69,7 @@ macOS:
   "mcpServers": {
     "serial": {
       "command": "/Users/<user>/.cargo/bin/serial-mcp-server",
-      "env": { "SERIAL_MCP_ALLOWLIST": "/dev/tty.usbmodem*,/dev/tty.usbserial-*" }
+      "args": ["--allowlist=/dev/tty.usbmodem*,/dev/tty.usbserial-*"]
     }
   }
 }
@@ -90,7 +81,7 @@ Windows:
   "mcpServers": {
     "serial": {
       "command": "C:\\Users\\<user>\\.cargo\\bin\\serial-mcp-server.exe",
-      "env": { "SERIAL_MCP_ALLOWLIST": "COM3,COM4" }
+      "args": ["--allowlist=COM3,COM4"]
     }
   }
 }
@@ -107,7 +98,7 @@ Windows:
   "mcpServers": {
     "serial": {
       "command": "/usr/local/bin/serial-mcp-server",
-      "env": { "SERIAL_MCP_ALLOWLIST": "/dev/ttyACM*,/dev/ttyUSB*" }
+      "args": ["--allowlist=/dev/ttyACM*,/dev/ttyUSB*"]
     }
   }
 }
@@ -123,7 +114,7 @@ Windows:
     "serial": {
       "type": "stdio",
       "command": "/usr/local/bin/serial-mcp-server",
-      "env": { "SERIAL_MCP_ALLOWLIST": "/dev/ttyACM*,/dev/ttyUSB*" }
+      "args": ["--allowlist=/dev/ttyACM*,/dev/ttyUSB*"]
     }
   }
 }
@@ -139,7 +130,7 @@ Windows:
     "serial-mcp-server": {
       "command": {
         "path": "/usr/local/bin/serial-mcp-server",
-        "args": []
+        "args": ["--allowlist=/dev/ttyACM*,/dev/ttyUSB*"]
       },
       "settings": {}
     }
@@ -157,7 +148,7 @@ Windows:
     "serial": {
       "type": "stdio",
       "command": "/usr/local/bin/serial-mcp-server",
-      "env": { "SERIAL_MCP_ALLOWLIST": "/dev/ttyACM*,/dev/ttyUSB*" }
+      "args": ["--allowlist=/dev/ttyACM*,/dev/ttyUSB*"]
     }
   }
 }
@@ -169,8 +160,8 @@ Start the server with `--transport=http` on the target machine:
 
 ```bash
 serial-mcp-server --transport=http
-# override bind address:
-SERIAL_MCP_HTTP_BIND=0.0.0.0:8000 serial-mcp-server --transport=http
+# custom bind address:
+serial-mcp-server --transport=http --bind=0.0.0.0:8000
 ```
 
 Agent config (any client that supports streamable HTTP):
@@ -193,8 +184,8 @@ Agent config (any client that supports streamable HTTP):
   "command": "cargo",
   "args": [
     "run", "--quiet", "--manifest-path", "/path/to/serial-mcp-server/Cargo.toml",
-    "--bin", "serial-mcp-server", "--"
-  ],
-  "env": { "SERIAL_MCP_ALLOWLIST": "/dev/ttyACM*" }
+    "--bin", "serial-mcp-server", "--",
+    "--allowlist=/dev/ttyACM*"
+  ]
 }
 ```
