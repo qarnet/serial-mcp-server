@@ -1,9 +1,8 @@
 # Code Review Walkthrough — `serial-mcp-server`
 
-> ⚠️ **Pegged to v0.2.1.** Newer files (e.g. `src/schema_helpers.rs`,
-> `tests/protocol_emulator.rs`, `tests/protocol_emulator_binary.rs`,
-> `tests/proptest.rs`, `tests/allowlist.rs`) are not covered below.
-> See CHANGELOG.md for v0.2.2+ additions.
+> ⚠️ **Pegged to v0.2.1.** Newer files and v0.3.0 changes (single binary,
+> CLI args replacing env vars) are not reflected here.
+> See CHANGELOG.md for additions since v0.2.2.
 
 ## Context
 
@@ -16,8 +15,7 @@ State of the repo, head of `main`:
 
 ```
 src/
-  main.rs            28 LOC   stdio binary entry
-  bin/http.rs        64 LOC   streamable-HTTP binary entry
+  main.rs           ~130 LOC  single entry point; --transport selects stdio or HTTP
   lib.rs              7 LOC   module declarations + re-exports
   error.rs           27 LOC   single SerialError enum
   codec.rs          184 LOC   Encoding enum + decode/encode + 9 tests
@@ -88,23 +86,10 @@ Six lines. Confirms the public surface: `Result`, `SerialError`,
 28 lines. Single tokio::main, logging setup, `SerialHandler::new()`
 on stdio.
 
-**Watch for:** no CLI flags. The only knobs are `RUST_LOG` and `SERIAL_MCP_ALLOWLIST`. The allowlist is set via environment variable (e.g., `SERIAL_MCP_ALLOWLIST="/dev/ttyACM*,/dev/ttyUSB*"`) — no config file needed.
-
-### 4. `src/bin/http.rs` — HTTP entry
-
-64 lines. The streamable-HTTP variant. Mount path `/mcp`, env
-`SERIAL_MCP_HTTP_BIND` overrides `127.0.0.1:8000`.
-
-**Watch for:**
-- Ctrl-C → cancellation token → graceful drain. Verify the shutdown
-  branches make sense.
-- No TLS, no auth, no Origin check (rmcp 1.6+ adds Origin validation,
-  default config). Is `127.0.0.1` default enough, or do you want to
-  flip the default to require an explicit bind override?
-- The `move || Ok(SerialHandler::new())` factory — every new HTTP
-  session gets its own handler instance, which means each session
-  has its own `ConnectionManager`. That's likely *not* what you want
-  in production (two clients can both open the same physical port).
+**Watch for (v0.3.0+):** transport selected via `--transport=http`. Allowlist
+via `--allowlist=<glob,...>`. Bind address via `--bind=<addr>`. `RUST_LOG`
+still controls log level. HTTP path: Ctrl-C → cancellation token → graceful
+drain. No TLS/auth — default bind `127.0.0.1:8000` is the safety boundary.
 
 ### 5. `src/error.rs` — error model
 
@@ -272,9 +257,8 @@ Confirms behaviour on physical hardware. Run with:
 
 ### 15. `tests/allowlist.rs` — Layer 8 (security)
 
-~220 lines, 3 tests. Tests the `SERIAL_MCP_ALLOWLIST` env var:
-blocks unauthorized ports, allows authorized ports, and supports
-glob patterns (`/dev/ttyACM*`).
+~220 lines, 3 tests. Tests the port allowlist (passed via `--allowlist`):
+blocks unauthorized ports, allows authorized ports, glob patterns (`/dev/ttyACM*`).
 
 ### 13. `CHANGELOG.md`
 
@@ -350,7 +334,7 @@ Likely candidates after you finish reading:
 ## Reviewer's punch list
 
 - [ ] `Cargo.toml` deps and features
-- [ ] `src/lib.rs` + `src/main.rs` + `src/bin/http.rs`
+- [ ] `src/lib.rs` + `src/main.rs`
 - [ ] `src/error.rs`
 - [ ] `src/codec.rs`
 - [ ] `src/serial.rs` (config enums → SerialIo → SerialConnection → ConnectionManager → test_support)

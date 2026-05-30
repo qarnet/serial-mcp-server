@@ -1,7 +1,7 @@
 //! Layer 2 — Port allowlist tests using the in-process HTTP harness.
 //!
-//! These tests verify that the `SERIAL_MCP_ALLOWLIST`-powered
-//! `SecurityManager` correctly allows or blocks port-open operations.
+//! These tests verify that `SecurityManager` (configured via `--allowlist`)
+//! correctly allows or blocks port-open operations.
 //! No child processes or OS serial ports are involved.
 
 use std::sync::Arc;

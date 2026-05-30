@@ -6,13 +6,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Breaking
 
-- **`serial-mcp-server-http` binary removed.** Use `serial-mcp-server --transport=http`
-  (or `SERIAL_MCP_TRANSPORT=http serial-mcp-server`) instead. The HTTP transport
-  is now a runtime flag, not a separate binary.
+- **`serial-mcp-server-http` binary removed.** Use `serial-mcp-server --transport=http` instead.
+- **`SERIAL_MCP_ALLOWLIST`, `SERIAL_MCP_HTTP_BIND`, `SERIAL_MCP_TRANSPORT` env vars removed.**
+  Use `--allowlist=<patterns>`, `--bind=<addr>`, `--transport=<stdio|http>` CLI flags instead.
 
 ### Added
 
-- `--transport=http` CLI flag and `SERIAL_MCP_TRANSPORT` env var to select HTTP transport.
+- `--transport=http` CLI flag to select HTTP transport.
 - Pre-built release binaries for macOS (arm64, x86_64) and Windows (x86_64) in addition to Linux.
 - Multi-platform CI: `ci.yml` now runs build/test/clippy on Linux, macOS, and Windows on every PR.
 - Agent config examples for Claude Code CLI, Cursor, VS Code (Copilot), and Zed.
