@@ -12,39 +12,90 @@ permissions:
   contents: write
 
 jobs:
-  release-x86_64:
-    name: Build and release x86_64 Linux binaries
-    runs-on: ubuntu-latest
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: serial-mcp-server
+            artifact_name_suffix: x86_64-linux
+            install: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+            strip: strip
+
+          - os: macos-14
+            target: aarch64-apple-darwin
+            artifact: serial-mcp-server
+            artifact_name_suffix: aarch64-macos
+            install: ""
+            strip: strip
+
+          - os: macos-13
+            target: x86_64-apple-darwin
+            artifact: serial-mcp-server
+            artifact_name_suffix: x86_64-macos
+            install: ""
+            strip: strip
+
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: serial-mcp-server.exe
+            artifact_name_suffix: x86_64-windows
+            install: ""
+            strip: ""
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install build dependencies
+      - name: Install system dependencies
+        if: matrix.install != ''
+        run: ${{ matrix.install }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Strip binary (Unix)
+        if: matrix.strip != ''
+        run: ${{ matrix.strip }} target/${{ matrix.target }}/release/${{ matrix.artifact }}
+
+      - name: Rename binary
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libudev-dev pkg-config
+          VERSION=${GITHUB_REF_NAME#v}
+          EXT="${{ matrix.artifact == 'serial-mcp-server.exe' && '.exe' || '' }}"
+          cp "target/${{ matrix.target }}/release/${{ matrix.artifact }}" \
+             "serial-mcp-server-${VERSION}-${{ matrix.artifact_name_suffix }}${EXT}"
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: serial-mcp-server-*
+
+  publish-crate:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install libudev
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build release binaries
-        run: cargo build --release --locked
-
-      - name: Strip binaries
-        run: |
-          strip target/release/serial-mcp-server
-          strip target/release/serial-mcp-server-http
-
-      - name: Rename binaries with version
-        run: |
-          VERSION=${GITHUB_REF_NAME#v}
-          cp target/release/serial-mcp-server "serial-mcp-server-${VERSION}-x86_64-linux"
-          cp target/release/serial-mcp-server-http "serial-mcp-server-http-${VERSION}-x86_64-linux"
-
-      - name: Create release
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          files: |
-            serial-mcp-server-*-x86_64-linux
-            serial-mcp-server-http-*-x86_64-linux
+      - name: Publish
+        run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

@@ -1,6 +1,6 @@
 {
-  "$comment": "Drop-in MCP server configuration for opencode. Place in opencode.json or merge into existing mcpServers.",
-  "mcpServers": {
+  "$comment": "Save as .vscode/mcp.json in your workspace root (VS Code Copilot MCP support).",
+  "servers": {
     "serial": {
       "type": "stdio",
       "command": "/usr/local/bin/serial-mcp-server",

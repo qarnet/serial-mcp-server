@@ -2,6 +2,24 @@
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Breaking
+
+- **`serial-mcp-server-http` binary removed.** Use `serial-mcp-server --transport=http`
+  (or `SERIAL_MCP_TRANSPORT=http serial-mcp-server`) instead. The HTTP transport
+  is now a runtime flag, not a separate binary.
+
+### Added
+
+- `--transport=http` CLI flag and `SERIAL_MCP_TRANSPORT` env var to select HTTP transport.
+- Pre-built release binaries for macOS (arm64, x86_64) and Windows (x86_64) in addition to Linux.
+- Multi-platform CI: `ci.yml` now runs build/test/clippy on Linux, macOS, and Windows on every PR.
+- Agent config examples for Claude Code CLI, Cursor, VS Code (Copilot), and Zed.
+- `cargo publish` step in `release.yml`; crate published to crates.io on each version tag.
+
+---
+
 ## [0.2.0] — fork (qarnet/serial-mcp-server)
 
 Aggressive rewrite of the original upstream release. Tracks rmcp 1.7,

@@ -1,8 +1,7 @@
 {
-  "$comment": "Drop-in MCP server configuration for opencode. Place in opencode.json or merge into existing mcpServers.",
+  "$comment": "Add to .claude/settings.json (project) or ~/.claude/settings.json (global). Replace the command path with your actual binary location.",
   "mcpServers": {
     "serial": {
-      "type": "stdio",
       "command": "/usr/local/bin/serial-mcp-server",
       "env": {
         "RUST_LOG": "warn",

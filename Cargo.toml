@@ -35,10 +35,6 @@ glob = "0.3"
 name = "serial-mcp-server"
 path = "src/main.rs"
 
-[[bin]]
-name = "serial-mcp-server-http"
-path = "src/bin/http.rs"
-
 [lib]
 name = "serial_mcp_server"
 path = "src/lib.rs"

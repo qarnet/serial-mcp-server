@@ -12,16 +12,25 @@ env:
 
 jobs:
   build-test:
-    name: build / test / clippy
-    runs-on: ubuntu-latest
+    name: build / test / clippy (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            install: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+          - os: macos-14
+            install: ""
+          - os: windows-latest
+            install: ""
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install libudev
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libudev-dev pkg-config
+      - name: Install system dependencies
+        if: matrix.install != ''
+        run: ${{ matrix.install }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -38,7 +47,7 @@ jobs:
         run: cargo build --all-targets --locked
 
       - name: cargo test
-        run: cargo test --all-targets --locked
+        run: cargo test --locked
 
       - name: cargo clippy
         run: cargo clippy --all-targets --locked -- -D warnings
