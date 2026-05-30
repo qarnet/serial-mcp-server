@@ -128,7 +128,6 @@ SERIAL_MCP_TEST_PORT=/dev/ttyACM0 cargo test --test hardware_loopback -- --ignor
 - [Agent Configuration](docs/agent-config.md)
 - [CHANGELOG.md](CHANGELOG.md)
 - [AGENTS.md](AGENTS.md) — contributor guidelines
-- [REVIEW.md](REVIEW.md) — code walkthrough
 
 ## License
 
