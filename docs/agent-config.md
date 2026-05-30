@@ -1,0 +1,200 @@
+# Agent Configuration
+
+Replace `command` paths with your actual binary location.
+See [Install](../README.md#install) for how to get the binary.
+
+## Port names by platform
+
+| Platform | Example ports | Notes |
+|---|---|---|
+| Linux | `/dev/ttyACM0`, `/dev/ttyUSB0` | Add user to `dialout` group: `sudo usermod -aG dialout $USER` |
+| macOS | `/dev/tty.usbmodem1101`, `/dev/tty.usbserial-*` | Grant serial permission on first use |
+| Windows | `COM3`, `COM4` | No extra setup needed |
+
+## Claude Code CLI
+
+Add to `.claude/settings.json` (project) or `~/.claude/settings.json` (global):
+
+```json
+{
+  "mcpServers": {
+    "serial": {
+      "command": "/usr/local/bin/serial-mcp-server",
+      "env": {
+        "RUST_LOG": "warn",
+        "SERIAL_MCP_ALLOWLIST": "/dev/ttyACM*,/dev/ttyUSB*"
+      }
+    }
+  }
+}
+```
+
+<details>
+<summary>Windows</summary>
+
+```json
+{
+  "mcpServers": {
+    "serial": {
+      "command": "C:\\Users\\<user>\\.cargo\\bin\\serial-mcp-server.exe",
+      "env": {
+        "SERIAL_MCP_ALLOWLIST": "COM3,COM4"
+      }
+    }
+  }
+}
+```
+
+</details>
+
+## Claude Desktop
+
+Config file location:
+- **Linux:** `~/.config/claude-desktop/claude_desktop_config.json`
+- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+
+```json
+{
+  "mcpServers": {
+    "serial": {
+      "command": "/usr/local/bin/serial-mcp-server",
+      "args": [],
+      "env": {
+        "RUST_LOG": "warn",
+        "SERIAL_MCP_ALLOWLIST": "/dev/ttyACM0"
+      }
+    }
+  }
+}
+```
+
+<details>
+<summary>macOS / Windows</summary>
+
+macOS:
+```json
+{
+  "mcpServers": {
+    "serial": {
+      "command": "/Users/<user>/.cargo/bin/serial-mcp-server",
+      "env": { "SERIAL_MCP_ALLOWLIST": "/dev/tty.usbmodem*,/dev/tty.usbserial-*" }
+    }
+  }
+}
+```
+
+Windows:
+```json
+{
+  "mcpServers": {
+    "serial": {
+      "command": "C:\\Users\\<user>\\.cargo\\bin\\serial-mcp-server.exe",
+      "env": { "SERIAL_MCP_ALLOWLIST": "COM3,COM4" }
+    }
+  }
+}
+```
+
+</details>
+
+## Cursor
+
+`.cursor/mcp.json` (project) or `~/.cursor/mcp.json` (global):
+
+```json
+{
+  "mcpServers": {
+    "serial": {
+      "command": "/usr/local/bin/serial-mcp-server",
+      "env": { "SERIAL_MCP_ALLOWLIST": "/dev/ttyACM*,/dev/ttyUSB*" }
+    }
+  }
+}
+```
+
+## VS Code (Copilot)
+
+`.vscode/mcp.json` in your workspace:
+
+```json
+{
+  "servers": {
+    "serial": {
+      "type": "stdio",
+      "command": "/usr/local/bin/serial-mcp-server",
+      "env": { "SERIAL_MCP_ALLOWLIST": "/dev/ttyACM*,/dev/ttyUSB*" }
+    }
+  }
+}
+```
+
+## Zed
+
+`~/.config/zed/settings.json` under `"context_servers"`:
+
+```json
+{
+  "context_servers": {
+    "serial-mcp-server": {
+      "command": {
+        "path": "/usr/local/bin/serial-mcp-server",
+        "args": []
+      },
+      "settings": {}
+    }
+  }
+}
+```
+
+## opencode
+
+`opencode.json` / `opencode.jsonc` (project) or `~/.config/opencode/opencode.json`:
+
+```json
+{
+  "mcpServers": {
+    "serial": {
+      "type": "stdio",
+      "command": "/usr/local/bin/serial-mcp-server",
+      "env": { "SERIAL_MCP_ALLOWLIST": "/dev/ttyACM*,/dev/ttyUSB*" }
+    }
+  }
+}
+```
+
+## HTTP transport (remote / headless)
+
+Start the server with `--transport=http` on the target machine:
+
+```bash
+serial-mcp-server --transport=http
+# override bind address:
+SERIAL_MCP_HTTP_BIND=0.0.0.0:8000 serial-mcp-server --transport=http
+```
+
+Agent config (any client that supports streamable HTTP):
+
+```json
+{
+  "mcpServers": {
+    "serial": {
+      "type": "streamable-http",
+      "url": "http://127.0.0.1:8000/mcp"
+    }
+  }
+}
+```
+
+## Dev one-liner (no install, cargo run from source)
+
+```json
+{
+  "command": "cargo",
+  "args": [
+    "run", "--quiet", "--manifest-path", "/path/to/serial-mcp-server/Cargo.toml",
+    "--bin", "serial-mcp-server", "--"
+  ],
+  "env": { "SERIAL_MCP_ALLOWLIST": "/dev/ttyACM*" }
+}
+```
